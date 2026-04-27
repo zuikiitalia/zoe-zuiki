@@ -1,0 +1,25 @@
+name = "zoe-zuiki"
+main = "src/index.ts"
+compatibility_date = "2026-01-15"
+compatibility_flags = ["nodejs_compat"]
+account_id = "8d710669f75539d86c5606bbd2c5c26d"
+
+# KV namespace per conversazioni, token Shopify, rate limit, OAuth state.
+# L'id va sostituito dopo: `wrangler kv namespace create ZOE_KV`.
+[[kv_namespaces]]
+binding = "ZOE_KV"
+id = "bb4065619661434493b7e4d0fd7a0949"
+
+[observability]
+enabled = true
+
+# Secrets da configurare con `wrangler secret put <NAME>`:
+#   ANTHROPIC_API_KEY
+#   SHOPIFY_CLIENT_ID
+#   SHOPIFY_CLIENT_SECRET
+#   SHOPIFY_SHOP_DOMAIN        (es. zuiki-italia.myshopify.com)
+#   SPOKI_API_KEY
+#   SPOKI_PRIVATE_TOKEN        (opzionale)
+#   WEBHOOK_SECRET             (32 char random — valida i webhook Spoki)
+#   TEAM_EMAIL                 (es. shoponline@zuiki.it)
+#   WHATSAPP_NUMBER            (es. +390230550379)
