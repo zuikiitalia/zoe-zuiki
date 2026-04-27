@@ -1,0 +1,50 @@
+name: Deploy to Cloudflare
+
+# Quando girare:
+# - Ogni push su main (= ogni PR mergeata) → deploy automatico
+# - Manualmente da Actions UI (workflow_dispatch) → utile per redeploy senza nuovo commit
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Concurrency: se arrivano due push ravvicinati, cancella il vecchio run e fa partire solo l'ultimo.
+# Evita race condition tipo "v2 deployata prima di v3" se il primo run è ancora in coda.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run tests (gate)
+        run: npx vitest run
+
+      - name: Typecheck (gate)
+        run: npx tsc --noEmit
+
+      - name: Deploy to Cloudflare Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Deploy result" >> $GITHUB_STEP_SUMMARY
+          echo "- Commit: \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Triggered by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Worker URL: https://zoe-zuiki.simone-8d7.workers.dev" >> $GITHUB_STEP_SUMMARY
