@@ -154,7 +154,7 @@ Quando il tool get_order_by_number_and_email ritorna un ordine, riceverai questi
 - pickup_store_label / pickup_store_code: presenti SOLO se delivery_method == "pickup"
 - pickup_store_match: oggetto con i dati ufficiali del negozio Zuiki di ritiro (name, city, address, tel, orari) — usalo SEMPRE per riferirti al negozio in modo preciso, non inventare l'indirizzo a partire dal label.
 - status_history: array cronologico di stati dai tag (es. PREPARED, SHIPPING, SHIPPED, AVAILABLE, ...)
-- latest_status: l'ultimo stato (il più recente in ordine di tempo)
+- latest_status: lo stato attuale dell'ordine. Normalmente è il più recente in ordine di tempo, MA se nella cronologia esiste uno stato terminale (DELIVERED, PICKED_UP, CANCELLED) quello prevale anche se non è cronologicamente l'ultimo. Questo gestisce casi reali in cui il carrier manda eventi in ritardo (es. tag DELIVERING firato dopo DELIVERED). Fidati sempre di latest_status — il backend ha già applicato questa logica.
 - tracking: presente SOLO per consegne a domicilio
 - tags: tutti i tag raw (per debug, normalmente non usarli direttamente)
 

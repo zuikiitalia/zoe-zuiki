@@ -293,6 +293,68 @@ describe('shopifyClient.getOrderByNameAndEmail (mock fetch)', () => {
     vi.unstubAllGlobals();
   });
 
+  it('DELIVERED vince come latest_status anche se cronologicamente non è ultimo, e parsa NAME con digit (INTRANSIT1)', async () => {
+    const env = makeEnv();
+    await (env.ZOE_KV as KVNamespace).put('shopify:access_token', 'fake-token');
+
+    const mockFetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            orders: {
+              edges: [
+                {
+                  node: {
+                    name: '#260100',
+                    email: 'cliente@example.com',
+                    createdAt: '2026-04-23T10:00:00Z',
+                    displayFinancialStatus: 'PAID',
+                    displayFulfillmentStatus: 'FULFILLED',
+                    totalPriceSet: { shopMoney: { amount: '49.00', currencyCode: 'EUR' } },
+                    shippingAddress: { city: 'Milano', country: 'IT' },
+                    lineItems: { edges: [{ node: { title: 'Maglione', quantity: 1, variant: { title: 'M' } } }] },
+                    fulfillments: [],
+                    // Sequenza reale osservata in produzione: il carrier ha mandato un evento DELIVERING
+                    // dopo il DELIVERED (timestamp 11:39 vs 00:06 stesso giorno). DELIVERED deve vincere.
+                    tags: [
+                      'STATUS:DELIVERED:24/04/2026:0006',
+                      'STATUS:DELIVERING:24/04/2026:1139',
+                      'STATUS:INTRANSIT1:23/04/2026:1816',
+                      'STATUS:PREPARED:23/04/2026:1156',
+                      'STATUS:SHIPPED:23/04/2026:1530',
+                      'STATUS:SHIPPING:23/04/2026:1257',
+                    ],
+                    metafields: { edges: [] },
+                  },
+                },
+              ],
+            },
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    );
+    vi.stubGlobal('fetch', mockFetch);
+
+    const { getOrderByNameAndEmail } = await import('../src/clients/shopifyClient');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await getOrderByNameAndEmail(env as any, '#260100', 'cliente@example.com');
+    expect(res.found).toBe(true);
+    // 6 tag STATUS:* TUTTI parsati (incluso INTRANSIT1 con digit nel nome)
+    expect(res.status_history).toHaveLength(6);
+    const names = res.status_history?.map((s) => s.name);
+    expect(names).toContain('INTRANSIT1');
+    // Cronologia ordinata correttamente per timestamp
+    expect(res.status_history?.[0]?.name).toBe('PREPARED');
+    expect(res.status_history?.[res.status_history.length - 1]?.name).toBe('DELIVERING');
+    // MA latest_status = DELIVERED (override per stato terminale)
+    expect(res.latest_status?.name).toBe('DELIVERED');
+    expect(res.latest_status?.date).toBe('24/04/2026');
+    expect(res.latest_status?.time).toBe('00:06');
+
+    vi.unstubAllGlobals();
+  });
+
   it('cross-reference: pickup label "Pavia Corso Cavour" trova il negozio Pavia C.S.', async () => {
     const env = makeEnv();
     await (env.ZOE_KV as KVNamespace).put('shopify:access_token', 'fake-token');
