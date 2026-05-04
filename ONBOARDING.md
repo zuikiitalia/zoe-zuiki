@@ -14,9 +14,9 @@ URL produzione: https://zoe-zuiki.simone-8d7.workers.dev
 
 ## 2. Repo
 
-- GitHub: `github.com/simnun/zoe-zuiki` (privato)
+- GitHub: `github.com/zuikiitalia/zoe-zuiki` (privato, sotto org `zuikiitalia` su piano Team)
 - Collaboratori: `simnun` (Simone Nunziata, founder Zuiki, project owner) e `aldoinnamorato` (Aldo, dev). Stessi diritti, entrambi possono mergiare PR.
-- Branch principale: `main`
+- Branch principale: `main`, protetto da Rulesets: PR obbligatoria + check `deploy` verde prima del merge
 - Convention: branch per feature → PR → merge → auto-deploy via GitHub Actions
 
 ## 3. Stack tecnico
@@ -78,10 +78,10 @@ ONBOARDING.md                   # questo file
 
 ## 6. Stato attuale (al 2026-05-04)
 
-- **Worker live**: versione v958b6d48 in produzione
-- **PR #1 aperta** (branch `setup-auto-deploy`): aggiunge GitHub Actions per auto-deploy. Da mergiare per attivare deploy condiviso. Token Cloudflare già in GitHub Secrets.
-- **Verifica live pendente**: il fix recente di pickup detection (ordine con metafield "Pavia Corso Cavour" che veniva trattato come consegna a casa) va testato live dopo che PR #1 è mergiata e il deploy nuovo è online.
-- **Aldo onboarding in corso**: configurazione team appena completata. Tutti i segreti vivono nei sistemi corretti, nessuno deve avere `.dev.vars` con valori reali sul Mac quando si lavora via claude.ai/code.
+- **Worker live**: deploy automatico via GitHub Actions a ogni merge su `main` (workflow `deploy.yml`). URL produzione sopra.
+- **Repo migrato sull'org `zuikiitalia`** (piano Team) il 2026-05-04. Branch protection attiva su `main`.
+- **Verifica live pickup detection pendente**: il fix recente sulla detection pickup (ordine con metafield "Pavia Corso Cavour" che veniva trattato come consegna a casa) va riprovato in live per conferma.
+- **Onboarding cloud**: entrambi i collaboratori lavorano da `claude.ai/code` con i propri account Anthropic. Nessuno tiene `.dev.vars` con valori reali sul Mac.
 
 ## 7. Convenzioni NON DEROGABILI
 
