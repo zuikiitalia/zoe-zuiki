@@ -1,17 +1,20 @@
 name: Deploy to Cloudflare
 
 # Quando girare:
-# - Ogni push su main (= ogni PR mergeata) → deploy automatico
+# - Push su main (= ogni PR mergeata) → test + typecheck + deploy
+# - Pull request verso main → solo test + typecheck (gate per branch protection, niente deploy)
 # - Manualmente da Actions UI (workflow_dispatch) → utile per redeploy senza nuovo commit
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
-# Concurrency: se arrivano due push ravvicinati, cancella il vecchio run e fa partire solo l'ultimo.
-# Evita race condition tipo "v2 deployata prima di v3" se il primo run è ancora in coda.
+# Concurrency: cancella i run obsoleti dello stesso ref. Push e PR hanno ref diversi
+# quindi non si cancellano a vicenda; due push ravvicinati su main sì.
 concurrency:
-  group: deploy-production
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -36,7 +39,9 @@ jobs:
       - name: Typecheck (gate)
         run: npx tsc --noEmit
 
+      # Deploy SOLO su push a main (o workflow_dispatch). Per le PR si fa solo gate.
       - name: Deploy to Cloudflare Workers
+        if: github.event_name != 'pull_request'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npx wrangler deploy
@@ -44,7 +49,10 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "### Deploy result" >> $GITHUB_STEP_SUMMARY
+          echo "### CI result" >> $GITHUB_STEP_SUMMARY
+          echo "- Event: \`${{ github.event_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Commit: \`${GITHUB_SHA::7}\`" >> $GITHUB_STEP_SUMMARY
           echo "- Triggered by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Worker URL: https://zoe-zuiki.simone-8d7.workers.dev" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "- Worker URL: https://zoe-zuiki.simone-8d7.workers.dev" >> $GITHUB_STEP_SUMMARY
+          fi
