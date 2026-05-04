@@ -88,16 +88,22 @@ git pull
 
 ## Deploy in produzione (Cloudflare)
 
-Solo Simone ha accesso al deploy ora. Per metterci mano servono:
-- `CLOUDFLARE_API_TOKEN` (chiedi a Simone)
-- Account ID Cloudflare già pinato in `wrangler.toml`
+**Il deploy è automatico**: ogni merge su `main` fa partire un workflow GitHub Actions che esegue test + typecheck + `wrangler deploy`. Non serve fare nulla a mano. Sia Simone che Aldo hanno gli stessi diritti: chi merga la PR fa partire il deploy.
 
-Comando:
+Cosa controllare dopo aver mergiato:
+1. Vai su https://github.com/simnun/zoe-zuiki/actions e verifica che il run "Deploy to Cloudflare" sia verde.
+2. Se è rosso: clicca sul run, guarda quale step ha fallito. Tipicamente test rotti o type error.
+3. Worker live: https://zoe-zuiki.simone-8d7.workers.dev/health → deve rispondere `{"status":"ok"}`.
+
+### Redeploy manuale (senza nuovo commit)
+Se serve riapplicare il deploy senza pushare codice nuovo (raro, es. dopo aver cambiato un secret in Cloudflare):
+
 ```bash
-CLOUDFLARE_API_TOKEN=... npx wrangler deploy
+gh workflow run "Deploy to Cloudflare" -R simnun/zoe-zuiki
 ```
 
-Per ora **non deployate da soli**: ogni PR merged in `main` la promuove Simone in produzione dopo verifica.
+### Deploy locale dal terminale (eccezionale)
+Da evitare come metodo standard — sporcate l'audit trail. Solo per emergenze. Serve `CLOUDFLARE_API_TOKEN` (chiedere a Simone tramite canale sicuro, non email).
 
 ## Cosa NON committare mai
 
