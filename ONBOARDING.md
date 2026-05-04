@@ -45,7 +45,7 @@ URL produzione: https://zoe-zuiki.simone-8d7.workers.dev
 ```
 src/
   index.ts                      # entrypoint Hono, route registration
-  config.ts                     # Env interface, costanti (CLAUDE_MODEL, MAX_HISTORY, RATE_LIMIT, ...)
+  config.ts                     # Env interface, costanti (CLAUDE_MODEL, MAX_HISTORY_MESSAGES, RATE_LIMIT, ...)
   handlers/
     spokiWebhook.ts             # webhook Spoki v2 (extract, allowlist, rate-limit, save)
     shopifyInstall.ts           # OAuth Shopify install redirect
