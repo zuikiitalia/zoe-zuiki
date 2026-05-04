@@ -87,7 +87,8 @@ interface ParsedStatus {
 
 function parseStatusTag(tag: string): ParsedStatus | null {
   // Formato: STATUS:NAME:DD/MM/YYYY:HHMM
-  const m = tag.match(/^STATUS:([A-Z_]+):(\d{2})\/(\d{2})\/(\d{4}):(\d{2})(\d{2})$/i);
+  // NAME può contenere lettere, underscore E digit (es. "INTRANSIT1") — visto in produzione.
+  const m = tag.match(/^STATUS:([A-Z0-9_]+):(\d{2})\/(\d{2})\/(\d{4}):(\d{2})(\d{2})$/i);
   if (!m) return null;
   const [, name, dd, mm, yyyy, hh, mi] = m;
   const ts = Date.UTC(
@@ -283,9 +284,15 @@ export async function getOrderByNameAndEmail(
     .filter((p): p is ParsedStatus => p !== null)
     .sort((a, b) => a.ts - b.ts);
   const statusHistory = parsedStatuses.map(({ name, date, time, raw }) => ({ name, date, time, raw }));
-  const latestStatus = parsedStatuses.length > 0
-    ? statusHistory[statusHistory.length - 1]
-    : undefined;
+  // Priorità degli stati TERMINALI sulla cronologia: in produzione abbiamo visto casi in cui
+  // dopo DELIVERED arrivano tag "stale" (es. DELIVERING fired in ritardo dal carrier). Una volta
+  // che un ordine è consegnato/ritirato/annullato, quello stato deve "vincere" come latest_status
+  // anche se cronologicamente non è l'ultimo. Stessa logica per pickup (PICKED_UP) e CANCELLED.
+  const TERMINAL_STATUSES = ['DELIVERED', 'PICKED_UP', 'CANCELLED'] as const;
+  const terminalHit = parsedStatuses.find((s) => (TERMINAL_STATUSES as readonly string[]).includes(s.name));
+  const latestStatus = terminalHit
+    ? { name: terminalHit.name, date: terminalHit.date, time: terminalHit.time, raw: terminalHit.raw }
+    : (parsedStatuses.length > 0 ? statusHistory[statusHistory.length - 1] : undefined);
 
   return {
     found: true,
