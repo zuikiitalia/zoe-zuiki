@@ -13,6 +13,12 @@ export interface Env {
   // Se presente e non vuota, Zoe risponde SOLO a questi numeri (modalità test/restricted).
   // Se assente o vuota, Zoe risponde a tutti.
   ALLOWLIST_PHONES?: string;
+  // Cloudflare AI (CLIP) — presente dopo setup wrangler.toml [ai].
+  // Opzionale: se assente, find_similar_product restituisce solo il link di ricerca.
+  AI?: Ai;
+  // Cloudflare Vectorize — presente dopo setup wrangler.toml [[vectorize]].
+  // Richiede anche l'indicizzazione one-time con scripts/indexProducts.ts.
+  PRODUCT_VECTORS?: VectorizeIndex;
 }
 
 export const CLAUDE_MODEL = 'claude-sonnet-4-6';

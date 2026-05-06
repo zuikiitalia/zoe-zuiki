@@ -74,6 +74,29 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'find_similar_product',
+    description: `Cerca nel catalogo Zuiki il prodotto visivamente più simile all'immagine inviata dal cliente. Usalo SOLO quando il cliente ha inviato una foto di un capo o accessorio (da social, competitor, o foto personale) e vuole trovare qualcosa di simile da Zuiki. NON usarlo per ricerche testuali: in quel caso usa search_products.
+
+COME IDENTIFICARE IL category_suffix dall'immagine:
+Abbigliamento: AB=Abito, AJ=Abito Jeans, BE=Bermuda, BJ=Bermuda Jeans, BO=Body, CA=Camicia, CB=Ciabatta, CD=Cardigan, CJ=Camicia Jeans, CN=Canotta, CP=Cappotto, CS=Casacca, CT=Costume, CV=Coprispalle, FE=Felpa, GB=Giubbino, GI=Giacca, GJ=Giubbino Jeans, GL=Gilet, GN=Gonna Jeans, GO=Gonna, GP=Giacca Ecopelle, GU=Guanti, IN=Infradito, LG=Leggings, MA=Maglia, PA=Pantaloni, PE=Pelliccia, PI=Piumino, PJ=Pantaloni Jeans, PR=Pareo, RE=Reggiseno Costume, RG=Reggiseno, SB=Slip Costume, SC=Sciarpa, SH=Shorts, SJ=Shorts Jeans, SM=Smanicato, SP=Spolverino, SR=Scarpe, TO=Top, TS=T-Shirt, TU=Tuta
+Accessori: AN=Anello, BC=Bracciale, BR=Borsa, C=Collana, CI=Cintura, CZ=Calze, FR=Fermacapelli, FS=Fascia, OC=Occhiali, OR=Orecchini, PC=Portachiavi, SE=Set
+Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalogo.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        category_suffix: {
+          type: 'string',
+          description: "Suffisso SKU della categoria rilevata nell'immagine (es. 'CA' per camicia, 'PA' per pantaloni). Lascia vuoto se incerto.",
+        },
+        search_keywords: {
+          type: 'string',
+          description: "Max 4 parole chiave in italiano che descrivono il capo nell'immagine (es. 'camicia righe geometriche fantasia'). Usate per generare il link di ricerca alternativo su zuiki.it.",
+        },
+      },
+      required: ['search_keywords'],
+    },
+  },
+  {
     name: 'open_support_ticket',
     description:
       "Apri un ticket di supporto al team umano. Usalo quando (a) il cliente lo chiede, (b) serve un'azione di scrittura su Shopify, (c) problema tecnico, (d) reclamo con toni legali. Ritorna conferma apertura ticket.",
