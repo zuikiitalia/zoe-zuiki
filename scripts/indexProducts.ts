@@ -126,12 +126,12 @@ async function getFashionCLIPEmbedding(
   retries = 4
 ): Promise<number[] | null> {
   const body = imageUrl
-    ? { data: [imageUrl, '', ''] }
-    : { data: ['', '', text ?? ''] };
+    ? { image_url: imageUrl, image_b64: '', text: '' }
+    : { image_url: '', image_b64: '', text: text ?? '' };
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(`${HF_SPACE_URL}/run/embed`, {
+      const res = await fetch(`${HF_SPACE_URL}/embed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -151,8 +151,8 @@ async function getFashionCLIPEmbedding(
         return null;
       }
 
-      const json = await res.json() as { data?: number[][] };
-      const embedding = json.data?.[0];
+      const json = await res.json() as { embedding?: number[] };
+      const embedding = json.embedding;
       if (!Array.isArray(embedding) || embedding.length === 0) return null;
       return embedding;
     } catch (err) {

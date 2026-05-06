@@ -11,7 +11,7 @@ export interface SimilarProductMatch {
   similarity: number;
 }
 
-const HF_SPACE_EMBED_PATH = '/run/embed';
+const HF_SPACE_EMBED_PATH = '/embed';
 
 /**
  * Chiama lo HF Space FashionCLIP con un'immagine base64.
@@ -45,14 +45,14 @@ async function callFashionCLIPSpace(
     const res = await fetch(`${env.HF_SPACE_URL}${HF_SPACE_EMBED_PATH}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: [input.image_url, input.image_b64, input.text] }),
+      body: JSON.stringify({ image_url: input.image_url, image_b64: input.image_b64, text: input.text }),
     });
     if (!res.ok) {
       logger.warn('fashion_clip_space_error', { status: res.status });
       return null;
     }
-    const json = await res.json() as { data?: number[][] };
-    const embedding = json.data?.[0];
+    const json = await res.json() as { embedding?: number[] };
+    const embedding = json.embedding;
     if (!Array.isArray(embedding) || embedding.length === 0) return null;
     return embedding;
   } catch (err) {

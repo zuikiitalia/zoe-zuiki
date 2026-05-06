@@ -26,10 +26,10 @@ app.onError((err, c) => {
 async function scheduled(env: Env): Promise<void> {
   if (!env.HF_SPACE_URL) return;
   try {
-    await fetch(`${env.HF_SPACE_URL}/run/embed`, {
+    await fetch(`${env.HF_SPACE_URL}/embed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: ['', '', 'ping'] }),
+      body: JSON.stringify({ text: 'ping' }),
       signal: AbortSignal.timeout(10000),
     });
     logger.info('space_keepalive_ok', {});
