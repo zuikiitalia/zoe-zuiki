@@ -13,18 +13,19 @@ id = "bb4065619661434493b7e4d0fd7a0949"
 [observability]
 enabled = true
 
-# Cloudflare AI — embedding CLIP per visual product matching.
-# Attivare creando l'indice Vectorize e indicizzando i prodotti (vedi scripts/indexProducts.ts).
-[ai]
-binding = "AI"
-
-# Vectorize — database vettori prodotti Zuiki (512 dim, metrica coseno).
-# Setup una-tantum:
+# Cloudflare AI + Vectorize — visual product matching (find_similar_product tool).
+# ATTIVARE dopo aver creato l'indice e indicizzato i prodotti:
 #   wrangler vectorize create zuiki-products --dimensions=512 --metric=cosine
 #   wrangler vectorize create-metadata-index zuiki-products --property-name=sku_suffix --type=string
-[[vectorize]]
-binding = "PRODUCT_VECTORS"
-index_name = "zuiki-products"
+#   npx ts-node --esm scripts/indexProducts.ts   (con credenziali reali)
+# Poi decommentare i due blocchi qui sotto e fare un nuovo deploy.
+#
+# [ai]
+# binding = "AI"
+#
+# [[vectorize]]
+# binding = "PRODUCT_VECTORS"
+# index_name = "zuiki-products"
 
 # Secrets da configurare con `wrangler secret put <NAME>`:
 #   ANTHROPIC_API_KEY
