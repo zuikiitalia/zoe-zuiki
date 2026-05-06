@@ -43,8 +43,23 @@ interface ShopifyProductsPage {
   };
 }
 
+async function fetchWithRetry(url: string, opts: RequestInit, maxRetries = 5): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, opts);
+      return res;
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const wait = Math.min(2000 * 2 ** attempt, 30000);
+      console.warn(`  Rete: errore (${err instanceof Error ? err.message : String(err)}), retry ${attempt + 1}/${maxRetries} tra ${wait}ms`);
+      await sleep(wait);
+    }
+  }
+  throw new Error('unreachable');
+}
+
 async function shopifyFetch(query: string, variables: Record<string, unknown>): Promise<ShopifyProductsPage> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `https://${SHOPIFY_DOMAIN}/admin/api/2025-01/graphql.json`,
     {
       method: 'POST',
