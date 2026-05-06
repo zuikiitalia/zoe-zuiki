@@ -90,7 +90,10 @@ async function executeTool(
         const queryWords = keywords.split(/\s+/).slice(0, 2).join('+');
         const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${queryWords}`;
 
-        // Text embedding match: embedda le keywords e cerca nel catalogo Vectorize.
+        // Text embedding match: embedda la descrizione visiva dettagliata per trovare il prodotto giusto.
+        const visualDescription = String(input.visual_description ?? '').trim();
+        const textToEmbed = visualDescription || keywords;
+
         let matchResult: {
           sku: string;
           title: string;
@@ -100,8 +103,8 @@ async function executeTool(
           category: string;
         } | null = null;
 
-        if (env.AI && env.PRODUCT_VECTORS && keywords) {
-          const embedding = await computeTextEmbedding(env, keywords);
+        if (env.AI && env.PRODUCT_VECTORS && textToEmbed) {
+          const embedding = await computeTextEmbedding(env, textToEmbed);
           if (embedding) {
             const topMatches = await findSimilarProducts(
               env,
