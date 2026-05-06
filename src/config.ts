@@ -13,8 +13,10 @@ export interface Env {
   // Se presente e non vuota, Zoe risponde SOLO a questi numeri (modalità test/restricted).
   // Se assente o vuota, Zoe risponde a tutti.
   ALLOWLIST_PHONES?: string;
-  // Cloudflare AI (CLIP) — presente dopo setup wrangler.toml [ai].
-  // Opzionale: se assente, find_similar_product restituisce solo il link di ricerca.
+  // HuggingFace API key per CLIP image embeddings (find_similar_product).
+  // Opzionale: se assente, find_similar_product usa solo text embedding o solo link.
+  HF_API_KEY?: string;
+  // Cloudflare AI — presente dopo setup wrangler.toml [ai].
   AI?: Ai;
   // Cloudflare Vectorize — presente dopo setup wrangler.toml [[vectorize]].
   // Richiede anche l'indicizzazione one-time con scripts/indexProducts.ts.

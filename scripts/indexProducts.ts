@@ -1,9 +1,12 @@
 /**
  * Script di indicizzazione prodotti Zuiki su Cloudflare Vectorize.
- * Usa embedding testuale (qwen3-embedding-0.6b) sul titolo prodotto + body_html.
+ * Usa CLIP (openai/clip-vit-base-patch32, 512 dims) via HuggingFace Inference API.
+ * Le immagini dei prodotti vengono embeddite visivamente: stile, colore, forma.
+ * Fallback: se un prodotto non ha immagine, usa CLIP text embedding sul titolo.
  *
  * SETUP UNA-TANTUM (da eseguire una sola volta):
- *   wrangler vectorize create zuiki-products --dimensions=1024 --metric=cosine
+ *   wrangler vectorize delete zuiki-products
+ *   wrangler vectorize create zuiki-products --dimensions=512 --metric=cosine
  *   wrangler vectorize create-metadata-index zuiki-products --property-name=sku_suffix --type=string
  *
  * USO:
@@ -11,6 +14,7 @@
  *   SHOPIFY_ACCESS_TOKEN=shpat_xxx \
  *   CLOUDFLARE_ACCOUNT_ID=8d710669f75539d86c5606bbd2c5c26d \
  *   CLOUDFLARE_API_TOKEN=xxx \
+ *   HF_API_KEY=hf_xxx \
  *   npx ts-node --esm scripts/indexProducts.ts
  *
  * AGGIORNAMENTO INCREMENTALE: rieseguire lo script — Vectorize fa upsert quindi
@@ -21,9 +25,12 @@ const SHOPIFY_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN!;
 const SHOPIFY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN!;
 const CF_ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID!;
 const CF_TOKEN = process.env.CLOUDFLARE_API_TOKEN!;
+const HF_API_KEY = process.env.HF_API_KEY!;
 const VECTORIZE_INDEX = 'zuiki-products';
 const BATCH_SIZE = 50;
-const CF_EMBED_MODEL = '@cf/qwen/qwen3-embedding-0.6b';
+
+const HF_CLIP_URL =
+  'https://api-inference.huggingface.co/pipeline/feature-extraction/openai/clip-vit-base-patch32';
 
 interface ShopifyProduct {
   handle: string;
@@ -113,29 +120,120 @@ function extractSkuSuffix(sku: string): string {
   return upper.slice(-2);
 }
 
-function stripHtml(html: string): string {
-  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+/**
+ * Calcola CLIP embedding da immagine URL.
+ * Scarica l'immagine e la invia come bytes a HuggingFace CLIP.
+ */
+async function computeClipImageEmbedding(imageUrl: string, retries = 3): Promise<number[] | null> {
+  let imgBytes: Uint8Array | null = null;
+  let mediaType = 'image/jpeg';
+
+  // Scarica immagine con retry
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const imgRes = await fetch(imageUrl, { redirect: 'follow' });
+      if (!imgRes.ok) {
+        console.warn(`  Immagine HTTP ${imgRes.status}: ${imageUrl.slice(0, 80)}`);
+        return null;
+      }
+      const ct = imgRes.headers.get('content-type') ?? '';
+      if (/image\/png/i.test(ct)) mediaType = 'image/png';
+      else if (/image\/webp/i.test(ct)) mediaType = 'image/webp';
+      const buf = await imgRes.arrayBuffer();
+      imgBytes = new Uint8Array(buf);
+      break;
+    } catch (err) {
+      if (attempt === retries) {
+        console.warn(`  Download immagine fallito: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      await sleep(2000 * 2 ** attempt);
+    }
+  }
+  if (!imgBytes) return null;
+
+  // Invia a HF CLIP
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(HF_CLIP_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${HF_API_KEY}`,
+          'Content-Type': mediaType,
+        },
+        body: imgBytes,
+      });
+
+      if (res.status === 503) {
+        // Modello in avvio (HF warm-up), aspetta e riprova
+        const body = await res.json() as { estimated_time?: number };
+        const wait = Math.round((body.estimated_time ?? 20) * 1000);
+        console.log(`  HF modello in avvio, aspetto ${wait}ms...`);
+        await sleep(wait);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text();
+        console.warn(`  HF CLIP ${res.status}: ${body.slice(0, 200)}`);
+        if (attempt < retries) { await sleep(3000 * 2 ** attempt); continue; }
+        return null;
+      }
+
+      const raw = await res.json() as number[] | number[][];
+      const embedding = Array.isArray(raw[0]) ? (raw as number[][])[0] : (raw as number[]);
+      if (!embedding || embedding.length === 0) return null;
+      return embedding;
+    } catch (err) {
+      if (attempt === retries) {
+        console.warn(`  HF CLIP errore: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      await sleep(3000 * 2 ** attempt);
+    }
+  }
+  return null;
 }
 
-async function getTextEmbedding(text: string): Promise<number[] | null> {
-  const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${CF_EMBED_MODEL}`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${CF_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ text }),
+/**
+ * Calcola CLIP text embedding (fallback per prodotti senza immagine).
+ */
+async function computeClipTextEmbedding(text: string, retries = 3): Promise<number[] | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(HF_CLIP_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${HF_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ inputs: text }),
+      });
+
+      if (res.status === 503) {
+        const body = await res.json() as { estimated_time?: number };
+        const wait = Math.round((body.estimated_time ?? 20) * 1000);
+        await sleep(wait);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.text();
+        if (attempt < retries) { await sleep(3000 * 2 ** attempt); continue; }
+        console.warn(`  HF CLIP text ${res.status}: ${body.slice(0, 200)}`);
+        return null;
+      }
+
+      const raw = await res.json() as number[] | number[][];
+      const embedding = Array.isArray(raw[0]) ? (raw as number[][])[0] : (raw as number[]);
+      if (!embedding || embedding.length === 0) return null;
+      return embedding;
+    } catch (err) {
+      if (attempt === retries) return null;
+      await sleep(3000 * 2 ** attempt);
     }
-  );
-  if (!res.ok) {
-    console.warn(`  CF AI ${res.status}: ${await res.text()}`);
-    return null;
   }
-  const json = await res.json() as { result?: { data?: number[][] }; success: boolean };
-  if (!json.success) return null;
-  return json.result?.data?.[0] ?? null;
+  return null;
 }
 
 interface VectorizeUpsertPayload {
@@ -167,12 +265,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function main() {
-  if (!SHOPIFY_DOMAIN || !SHOPIFY_TOKEN || !CF_ACCOUNT || !CF_TOKEN) {
-    console.error('Variabili d\'ambiente mancanti: SHOPIFY_SHOP_DOMAIN, SHOPIFY_ACCESS_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN');
+  if (!SHOPIFY_DOMAIN || !SHOPIFY_TOKEN || !CF_ACCOUNT || !CF_TOKEN || !HF_API_KEY) {
+    console.error('Variabili mancanti: SHOPIFY_SHOP_DOMAIN, SHOPIFY_ACCESS_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, HF_API_KEY');
     process.exit(1);
   }
 
-  console.log('Inizio indicizzazione prodotti Zuiki su Vectorize (text embedding)...');
+  console.log('Inizio indicizzazione prodotti Zuiki su Vectorize (CLIP 512-dim)...');
   let total = 0;
   let indexed = 0;
   let skipped = 0;
@@ -182,16 +280,25 @@ async function main() {
     total++;
     const sku = product.variants.edges[0]?.node.sku ?? '';
     const skuSuffix = extractSkuSuffix(sku);
-    const description = stripHtml(product.descriptionHtml ?? '');
-    const textToEmbed = description
-      ? `${product.title}. ${description}`
-      : product.title;
 
-    const embedding = await getTextEmbedding(textToEmbed);
+    let embedding: number[] | null = null;
+
+    if (product.featuredImage?.url) {
+      embedding = await computeClipImageEmbedding(product.featuredImage.url);
+      if (!embedding) {
+        console.log(`  [IMG_FAIL] ${product.handle} — CLIP immagine fallito, provo testo`);
+      }
+    }
+
+    if (!embedding) {
+      // Fallback: CLIP text embedding sul titolo
+      embedding = await computeClipTextEmbedding(product.title);
+    }
+
     if (!embedding) {
       console.log(`  [SKIP] ${product.handle} — embedding fallito`);
       skipped++;
-      await sleep(1000);
+      await sleep(1500);
       continue;
     }
 
@@ -216,7 +323,8 @@ async function main() {
       await sleep(200);
     }
 
-    await sleep(50); // ~20 req/s verso CF AI
+    // HF free tier: ~1 req/s per immagine + 1 download → 1000ms di margine
+    await sleep(1000);
   }
 
   if (batch.length > 0) {
