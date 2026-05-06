@@ -44,7 +44,7 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: npx wrangler deploy --message "${GITHUB_SHA::7} - ${{ github.actor }}"
+        run: npx wrangler deploy
 
       - name: Summary
         if: always()
