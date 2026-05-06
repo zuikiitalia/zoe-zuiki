@@ -14,9 +14,15 @@ import {
   ShopifyNotInstalledError,
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
+import {
+  computeImageEmbedding,
+  findSimilarProducts,
+  base64ToByteArray,
+} from '../clients/vectorizeClient';
 import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
 import { ZUIKI_STORES } from '../data/stores';
+import { getCategoryName } from '../data/skuSuffixes';
 
 function searchStores(input: Record<string, unknown>) {
   const city = (input.city as string | undefined)?.toLowerCase().trim();
@@ -53,7 +59,8 @@ async function executeTool(
   env: Env,
   phone: string,
   name: string,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  imageEmbeddings: number[][] = []
 ): Promise<string> {
   try {
     switch (name) {
@@ -76,6 +83,56 @@ async function executeTool(
       case 'search_stores': {
         // Questo tool è locale (dati statici in src/data/stores.ts), non chiama API esterne.
         return JSON.stringify(searchStores(input));
+      }
+      case 'find_similar_product': {
+        const suffix = String(input.category_suffix ?? '').toUpperCase().trim();
+        const keywords = String(input.search_keywords ?? '').trim();
+
+        // Costruisce il link di ricerca semantica (max 4 parole, URL-safe con +).
+        const queryWords = keywords.split(/\s+/).slice(0, 4).join('+');
+        const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${queryWords}`;
+
+        // Visual match: usa l'embedding CLIP del primo frame disponibile.
+        let matchResult: {
+          sku: string;
+          title: string;
+          url: string;
+          image_url: string;
+          similarity_percent: number;
+          category: string;
+        } | null = null;
+
+        if (imageEmbeddings.length > 0) {
+          const topMatches = await findSimilarProducts(
+            env,
+            imageEmbeddings[0]!,
+            suffix || undefined,
+            3
+          );
+          logger.info('visual_search_results', {
+            count: topMatches.length,
+            top_score: topMatches[0]?.similarity,
+            suffix: suffix || 'any',
+          }, phone);
+          const best = topMatches[0];
+          if (best) {
+            matchResult = {
+              sku: best.sku,
+              title: best.title,
+              url: best.url,
+              image_url: best.image_url,
+              similarity_percent: Math.round(best.similarity * 100),
+              category: getCategoryName(best.sku_suffix),
+            };
+          }
+        }
+
+        return JSON.stringify({
+          match: matchResult,
+          search_url: searchUrl,
+          search_keywords: keywords,
+          visual_search_available: imageEmbeddings.length > 0 && !!env.PRODUCT_VECTORS,
+        });
       }
       case 'open_support_ticket': {
         const reason = String(input.reason ?? 'other');
@@ -222,17 +279,26 @@ function formatNowItalian(): string {
   return fmt.format(now);
 }
 
+/**
+ * Scarica tutte le immagini da una lista di URL e ritorna solo quelle riuscite.
+ * Separato da buildFirstUserContent per riusare le immagini anche per CLIP embedding.
+ */
+async function downloadImages(imageUrls: string[], phone: string): Promise<DownloadedImage[]> {
+  const downloads = await Promise.all(imageUrls.map((url) => downloadImageAsBase64(url, phone)));
+  return downloads.filter((d): d is DownloadedImage => d !== null);
+}
+
 async function buildFirstUserContent(
   text: string,
   imageUrls: string[],
-  phone: string
+  phone: string,
+  preDownloaded?: DownloadedImage[]
 ): Promise<Anthropic.MessageParam['content']> {
   // Iniezione ora corrente: aiuta Zoe a ragionare su "fra X ore", "stasera", ecc.
   const nowLine = `[Sistema — ora attuale (Italia): ${formatNowItalian()}]`;
 
-  // Scarica tutte le immagini in parallelo
-  const downloads = await Promise.all(imageUrls.map((url) => downloadImageAsBase64(url, phone)));
-  const validImages = downloads.filter((d): d is DownloadedImage => d !== null);
+  // Usa le immagini pre-scaricate se disponibili, altrimenti scarica ora.
+  const validImages = preDownloaded ?? await downloadImages(imageUrls, phone);
 
   if (validImages.length === 0) {
     // Caso solo testo (anche se l'utente ha mandato immagini, se il download è fallito).
@@ -278,7 +344,22 @@ export async function processMessage(
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
-  const firstUserContent = await buildFirstUserContent(userMessage, images, phone);
+  // Scarica immagini una sola volta (riusate per Claude content + CLIP embedding).
+  const downloadedImages = images.length > 0 ? await downloadImages(images, phone) : [];
+
+  // Calcola embedding CLIP in parallelo (solo se AI + Vectorize sono disponibili).
+  let imageEmbeddings: number[][] = [];
+  if (downloadedImages.length > 0 && env.AI && env.PRODUCT_VECTORS) {
+    const embs = await Promise.all(
+      downloadedImages.map((img) => computeImageEmbedding(env, base64ToByteArray(img.base64)))
+    );
+    imageEmbeddings = embs.filter((e): e is number[] => e !== null);
+    if (imageEmbeddings.length > 0) {
+      logger.info('clip_embeddings_ready', { count: imageEmbeddings.length }, phone);
+    }
+  }
+
+  const firstUserContent = await buildFirstUserContent(userMessage, images, phone, downloadedImages);
   const messages: Anthropic.MessageParam[] = [
     ...history.map((m) => ({ role: m.role, content: m.content })),
     { role: 'user' as const, content: firstUserContent },
@@ -337,7 +418,7 @@ export async function processMessage(
             { tool: block.name, input_keys: Object.keys(block.input as object) },
             phone
           );
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>);
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, imageEmbeddings);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
