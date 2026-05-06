@@ -88,12 +88,16 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
           type: 'string',
           description: "Suffisso SKU della categoria rilevata nell'immagine (es. 'CA' per camicia, 'PA' per pantaloni). Lascia vuoto se incerto.",
         },
+        visual_description: {
+          type: 'string',
+          description: "Descrizione dettagliata del capo nell'immagine in italiano: tipo di capo, colori, fantasia/trama, stile, dettagli (es. 'camicia maniche lunghe fantasia floreale azzurra su fondo bianco colletto classico chiusura bottoni'). Più è ricca, migliore è la ricerca. OBBLIGATORIA quando il cliente ha mandato un'immagine.",
+        },
         search_keywords: {
           type: 'string',
-          description: "Max 4 parole chiave in italiano che descrivono il capo nell'immagine (es. 'camicia righe geometriche fantasia'). Usate per generare il link di ricerca alternativo su zuiki.it.",
+          description: "1-2 parole chiave semplici per il link di ricerca alternativo su zuiki.it (es. 'camicia floreale', 'pantalone fluido').",
         },
       },
-      required: ['search_keywords'],
+      required: ['visual_description', 'search_keywords'],
     },
   },
   {
