@@ -34,4 +34,3 @@ index_name = "zuiki-products"
 #   WEBHOOK_SECRET             (32 char random — valida i webhook Spoki)
 #   TEAM_EMAIL                 (es. shoponline@zuiki.it)
 #   WHATSAPP_NUMBER            (es. +390230550379)
-#   HF_API_KEY                 (token HuggingFace per CLIP image search — hf.co/settings/tokens)

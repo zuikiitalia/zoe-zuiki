@@ -1,12 +1,16 @@
 /**
  * Script di indicizzazione prodotti Zuiki su Cloudflare Vectorize.
- * Usa CLIP (openai/clip-vit-base-patch32, 512 dims) via HuggingFace Inference API.
- * Le immagini dei prodotti vengono embeddite visivamente: stile, colore, forma.
- * Fallback: se un prodotto non ha immagine, usa CLIP text embedding sul titolo.
  *
- * SETUP UNA-TANTUM (da eseguire una sola volta):
- *   wrangler vectorize delete zuiki-products
- *   wrangler vectorize create zuiki-products --dimensions=512 --metric=cosine
+ * Strategia: immagine prodotto → LLaVA 7B (CF AI) → descrizione italiana →
+ *            qwen3-embedding-0.6b (CF AI) → vettore 1024-dim → Vectorize
+ *
+ * Il matching funziona perché sia l'indice (LLaVA) sia le query (Claude)
+ * generano descrizioni italiane dei capi → stesso spazio semantico.
+ *
+ * Fallback: se il prodotto non ha immagine, usa titolo+descrizione Shopify.
+ *
+ * SETUP UNA-TANTUM:
+ *   wrangler vectorize create zuiki-products --dimensions=1024 --metric=cosine
  *   wrangler vectorize create-metadata-index zuiki-products --property-name=sku_suffix --type=string
  *
  * USO:
@@ -14,23 +18,19 @@
  *   SHOPIFY_ACCESS_TOKEN=shpat_xxx \
  *   CLOUDFLARE_ACCOUNT_ID=8d710669f75539d86c5606bbd2c5c26d \
  *   CLOUDFLARE_API_TOKEN=xxx \
- *   HF_API_KEY=hf_xxx \
  *   npx ts-node --esm scripts/indexProducts.ts
- *
- * AGGIORNAMENTO INCREMENTALE: rieseguire lo script — Vectorize fa upsert quindi
- * i prodotti già indicizzati vengono aggiornati, quelli nuovi aggiunti.
  */
 
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN!;
 const SHOPIFY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN!;
 const CF_ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID!;
 const CF_TOKEN = process.env.CLOUDFLARE_API_TOKEN!;
-const HF_API_KEY = process.env.HF_API_KEY!;
 const VECTORIZE_INDEX = 'zuiki-products';
 const BATCH_SIZE = 50;
-
-const HF_CLIP_URL =
-  'https://api-inference.huggingface.co/pipeline/feature-extraction/openai/clip-vit-base-patch32';
+const CF_EMBED_MODEL = '@cf/qwen/qwen3-embedding-0.6b';
+const CF_VISION_MODEL = '@cf/llava-hf/llava-1.5-7b-hf';
+// Dimensione massima immagine da inviare a LLaVA (evita payload troppo grandi)
+const MAX_IMAGE_BYTES_VISION = 600_000;
 
 interface ShopifyProduct {
   handle: string;
@@ -120,117 +120,111 @@ function extractSkuSuffix(sku: string): string {
   return upper.slice(-2);
 }
 
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
 /**
- * Calcola CLIP embedding da immagine URL.
- * Scarica l'immagine e la invia come bytes a HuggingFace CLIP.
+ * Scarica l'immagine del prodotto e interroga LLaVA per una descrizione italiana.
+ * Ritorna null se l'immagine non è disponibile o la call fallisce.
  */
-async function computeClipImageEmbedding(imageUrl: string, retries = 3): Promise<number[] | null> {
-  let imgBytes: Uint8Array | null = null;
-  let mediaType = 'image/jpeg';
+async function describeImageWithLlava(imageUrl: string): Promise<string | null> {
+  let imgBytes: number[] | null = null;
 
-  // Scarica immagine con retry
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const imgRes = await fetch(imageUrl, { redirect: 'follow' });
-      if (!imgRes.ok) {
-        console.warn(`  Immagine HTTP ${imgRes.status}: ${imageUrl.slice(0, 80)}`);
-        return null;
-      }
-      const ct = imgRes.headers.get('content-type') ?? '';
-      if (/image\/png/i.test(ct)) mediaType = 'image/png';
-      else if (/image\/webp/i.test(ct)) mediaType = 'image/webp';
-      const buf = await imgRes.arrayBuffer();
-      imgBytes = new Uint8Array(buf);
-      break;
-    } catch (err) {
-      if (attempt === retries) {
-        console.warn(`  Download immagine fallito: ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
-      await sleep(2000 * 2 ** attempt);
+  // Scarica immagine
+  try {
+    const imgRes = await fetchWithRetry(imageUrl, { redirect: 'follow' });
+    if (!imgRes.ok) {
+      console.warn(`  Immagine HTTP ${imgRes.status}`);
+      return null;
     }
+    const buf = await imgRes.arrayBuffer();
+    if (buf.byteLength > MAX_IMAGE_BYTES_VISION) {
+      console.warn(`  Immagine troppo grande (${buf.byteLength} bytes), uso testo`);
+      return null;
+    }
+    imgBytes = Array.from(new Uint8Array(buf));
+  } catch (err) {
+    console.warn(`  Download immagine: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
-  if (!imgBytes) return null;
 
-  // Invia a HF CLIP
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  // Chiedi descrizione a LLaVA
+  for (let attempt = 0; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(HF_CLIP_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${HF_API_KEY}`,
-          'Content-Type': mediaType,
-        },
-        body: imgBytes,
-      });
-
-      if (res.status === 503) {
-        // Modello in avvio (HF warm-up), aspetta e riprova
-        const body = await res.json() as { estimated_time?: number };
-        const wait = Math.round((body.estimated_time ?? 20) * 1000);
-        console.log(`  HF modello in avvio, aspetto ${wait}ms...`);
-        await sleep(wait);
-        continue;
-      }
-
+      const res = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${CF_VISION_MODEL}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${CF_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            image: imgBytes,
+            prompt: 'Descrivi in italiano questo capo di abbigliamento o accessorio: tipo, colori principali, fantasia o trama, stile, dettagli come colletto o chiusura. Risposta breve in una frase.',
+            max_tokens: 120,
+          }),
+        }
+      );
       if (!res.ok) {
         const body = await res.text();
-        console.warn(`  HF CLIP ${res.status}: ${body.slice(0, 200)}`);
-        if (attempt < retries) { await sleep(3000 * 2 ** attempt); continue; }
+        console.warn(`  LLaVA ${res.status}: ${body.slice(0, 150)}`);
+        if (attempt < 3) { await sleep(3000 * 2 ** attempt); continue; }
         return null;
       }
-
-      const raw = await res.json() as number[] | number[][];
-      const embedding = Array.isArray(raw[0]) ? (raw as number[][])[0] : (raw as number[]);
-      if (!embedding || embedding.length === 0) return null;
-      return embedding;
+      const json = await res.json() as { result?: { description?: string }; success: boolean; errors?: Array<{ message: string }> };
+      if (!json.success) {
+        const msg = json.errors?.[0]?.message ?? '';
+        // Rate limit o errore temporaneo
+        if (msg.includes('rate') || msg.includes('limit')) {
+          console.warn(`  LLaVA rate limit, aspetto 10s...`);
+          await sleep(10000);
+          continue;
+        }
+        console.warn(`  LLaVA error: ${msg.slice(0, 100)}`);
+        if (attempt < 3) { await sleep(5000); continue; }
+        return null;
+      }
+      const description = json.result?.description?.trim() ?? '';
+      return description || null;
     } catch (err) {
-      if (attempt === retries) {
-        console.warn(`  HF CLIP errore: ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-      }
+      if (attempt === 3) return null;
       await sleep(3000 * 2 ** attempt);
     }
   }
   return null;
 }
 
-/**
- * Calcola CLIP text embedding (fallback per prodotti senza immagine).
- */
-async function computeClipTextEmbedding(text: string, retries = 3): Promise<number[] | null> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
+async function getTextEmbedding(text: string): Promise<number[] | null> {
+  for (let attempt = 0; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(HF_CLIP_URL, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${HF_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ inputs: text }),
-      });
-
-      if (res.status === 503) {
-        const body = await res.json() as { estimated_time?: number };
-        const wait = Math.round((body.estimated_time ?? 20) * 1000);
-        await sleep(wait);
-        continue;
-      }
-
+      const res = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${CF_EMBED_MODEL}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${CF_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ text }),
+        }
+      );
       if (!res.ok) {
         const body = await res.text();
-        if (attempt < retries) { await sleep(3000 * 2 ** attempt); continue; }
-        console.warn(`  HF CLIP text ${res.status}: ${body.slice(0, 200)}`);
+        if (attempt < 3) { await sleep(2000 * 2 ** attempt); continue; }
+        console.warn(`  CF AI ${res.status}: ${body.slice(0, 100)}`);
         return null;
       }
-
-      const raw = await res.json() as number[] | number[][];
-      const embedding = Array.isArray(raw[0]) ? (raw as number[][])[0] : (raw as number[]);
-      if (!embedding || embedding.length === 0) return null;
-      return embedding;
+      const json = await res.json() as { result?: { data?: number[][] }; success: boolean };
+      if (!json.success) return null;
+      return json.result?.data?.[0] ?? null;
     } catch (err) {
-      if (attempt === retries) return null;
-      await sleep(3000 * 2 ** attempt);
+      if (attempt === 3) {
+        console.warn(`  Embedding errore: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+      await sleep(2000 * 2 ** attempt);
     }
   }
   return null;
@@ -265,15 +259,17 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function main() {
-  if (!SHOPIFY_DOMAIN || !SHOPIFY_TOKEN || !CF_ACCOUNT || !CF_TOKEN || !HF_API_KEY) {
-    console.error('Variabili mancanti: SHOPIFY_SHOP_DOMAIN, SHOPIFY_ACCESS_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, HF_API_KEY');
+  if (!SHOPIFY_DOMAIN || !SHOPIFY_TOKEN || !CF_ACCOUNT || !CF_TOKEN) {
+    console.error('Variabili mancanti: SHOPIFY_SHOP_DOMAIN, SHOPIFY_ACCESS_TOKEN, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN');
     process.exit(1);
   }
 
-  console.log('Inizio indicizzazione prodotti Zuiki su Vectorize (CLIP 512-dim)...');
+  console.log('Inizio indicizzazione prodotti Zuiki (LLaVA vision + qwen3 embeddings, 1024-dim)...');
   let total = 0;
   let indexed = 0;
   let skipped = 0;
+  let visionUsed = 0;
+  let textFallback = 0;
   const batch: VectorizeUpsertPayload[] = [];
 
   for await (const product of fetchAllProducts()) {
@@ -281,24 +277,28 @@ async function main() {
     const sku = product.variants.edges[0]?.node.sku ?? '';
     const skuSuffix = extractSkuSuffix(sku);
 
-    let embedding: number[] | null = null;
-
+    // 1) Prova a descrivere l'immagine con LLaVA
+    let textToEmbed: string | null = null;
     if (product.featuredImage?.url) {
-      embedding = await computeClipImageEmbedding(product.featuredImage.url);
-      if (!embedding) {
-        console.log(`  [IMG_FAIL] ${product.handle} — CLIP immagine fallito, provo testo`);
+      const visionDesc = await describeImageWithLlava(product.featuredImage.url);
+      if (visionDesc) {
+        textToEmbed = visionDesc;
+        visionUsed++;
       }
     }
 
-    if (!embedding) {
-      // Fallback: CLIP text embedding sul titolo
-      embedding = await computeClipTextEmbedding(product.title);
+    // 2) Fallback: usa titolo + descrizione Shopify
+    if (!textToEmbed) {
+      const description = stripHtml(product.descriptionHtml ?? '');
+      textToEmbed = description ? `${product.title}. ${description}` : product.title;
+      textFallback++;
     }
 
+    const embedding = await getTextEmbedding(textToEmbed);
     if (!embedding) {
       console.log(`  [SKIP] ${product.handle} — embedding fallito`);
       skipped++;
-      await sleep(1500);
+      await sleep(1000);
       continue;
     }
 
@@ -318,13 +318,13 @@ async function main() {
     if (batch.length >= BATCH_SIZE) {
       await upsertVectors(batch);
       indexed += batch.length;
-      console.log(`  Indicizzati ${indexed} prodotti finora...`);
+      console.log(`  Indicizzati ${indexed}/${total} | vision: ${visionUsed}, testo: ${textFallback}`);
       batch.length = 0;
       await sleep(200);
     }
 
-    // HF free tier: ~1 req/s per immagine + 1 download → 1000ms di margine
-    await sleep(1000);
+    // Rate limiting CF AI: ~2s tra ogni prodotto
+    await sleep(2000);
   }
 
   if (batch.length > 0) {
@@ -333,6 +333,7 @@ async function main() {
   }
 
   console.log(`\nCompletato. Totale: ${total}, Indicizzati: ${indexed}, Saltati: ${skipped}`);
+  console.log(`Vision LLaVA: ${visionUsed}, Fallback testo: ${textFallback}`);
 }
 
 main().catch((err) => {

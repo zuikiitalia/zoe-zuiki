@@ -15,8 +15,7 @@ import {
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
 import {
-  computeImageEmbeddingClip,
-  computeTextEmbeddingClip,
+  computeTextEmbedding,
   findSimilarProducts,
 } from '../clients/vectorizeClient';
 import { logger } from '../utils/logger';
@@ -59,8 +58,7 @@ async function executeTool(
   env: Env,
   phone: string,
   name: string,
-  input: Record<string, unknown>,
-  clipEmbedding?: number[] | null
+  input: Record<string, unknown>
 ): Promise<string> {
   try {
     switch (name) {
@@ -93,6 +91,11 @@ async function executeTool(
         const queryWords = keywords.split(/\s+/).slice(0, 2).join('+');
         const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${queryWords}`;
 
+        // Embedding della descrizione visiva dettagliata generata da Claude.
+        // I prodotti nel Vectorize sono indicizzati con descrizioni generate da LLaVA
+        // → stesso spazio semantico italiano → match accurato.
+        const textToEmbed = visualDescription || keywords;
+
         let matchResult: {
           sku: string;
           title: string;
@@ -102,16 +105,8 @@ async function executeTool(
           category: string;
         } | null = null;
 
-        if (env.PRODUCT_VECTORS) {
-          // 1) CLIP image embedding dal foto del cliente (priorità massima)
-          let embedding: number[] | null = clipEmbedding ?? null;
-          const embeddingSource = embedding ? 'clip_image' : null;
-
-          // 2) CLIP text embedding dalla descrizione visiva (fallback se niente foto)
-          if (!embedding && env.HF_API_KEY && visualDescription) {
-            embedding = await computeTextEmbeddingClip(env, visualDescription);
-          }
-
+        if (env.AI && env.PRODUCT_VECTORS && textToEmbed) {
+          const embedding = await computeTextEmbedding(env, textToEmbed);
           if (embedding) {
             const topMatches = await findSimilarProducts(
               env,
@@ -119,8 +114,7 @@ async function executeTool(
               suffix || undefined,
               3
             );
-            logger.info('clip_search_results', {
-              source: embeddingSource ?? 'clip_text',
+            logger.info('visual_search_results', {
               count: topMatches.length,
               top_score: topMatches[0]?.similarity,
               suffix: suffix || 'any',
@@ -143,7 +137,7 @@ async function executeTool(
           match: matchResult,
           search_url: searchUrl,
           search_keywords: keywords,
-          visual_search_available: !!env.HF_API_KEY && !!env.PRODUCT_VECTORS,
+          visual_search_available: !!env.AI && !!env.PRODUCT_VECTORS,
         });
       }
       case 'open_support_ticket': {
@@ -356,15 +350,8 @@ export async function processMessage(
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
-  // Scarica immagini una sola volta (per Claude content e CLIP embedding).
+  // Scarica immagini una sola volta (per Claude content).
   const downloadedImages = images.length > 0 ? await downloadImages(images, phone) : [];
-
-  // Calcola CLIP embedding dalla prima immagine del cliente (usato da find_similar_product).
-  const firstImage = downloadedImages[0];
-  const clipEmbedding =
-    firstImage && env.HF_API_KEY
-      ? await computeImageEmbeddingClip(env, firstImage.base64, firstImage.mediaType)
-      : null;
 
   const firstUserContent = await buildFirstUserContent(userMessage, images, phone, downloadedImages);
   const messages: Anthropic.MessageParam[] = [
@@ -425,7 +412,7 @@ export async function processMessage(
             { tool: block.name, input_keys: Object.keys(block.input as object) },
             phone
           );
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding);
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
