@@ -13,19 +13,16 @@ id = "bb4065619661434493b7e4d0fd7a0949"
 [observability]
 enabled = true
 
-# Cloudflare AI + Vectorize — visual product matching (find_similar_product tool).
-# ATTIVARE dopo aver creato l'indice e indicizzato i prodotti:
-#   wrangler vectorize create zuiki-products --dimensions=512 --metric=cosine
-#   wrangler vectorize create-metadata-index zuiki-products --property-name=sku_suffix --type=string
-#   npx ts-node --esm scripts/indexProducts.ts   (con credenziali reali)
-# Poi decommentare i due blocchi qui sotto e fare un nuovo deploy.
-#
-# [ai]
-# binding = "AI"
-#
-# [[vectorize]]
-# binding = "PRODUCT_VECTORS"
-# index_name = "zuiki-products"
+# Cloudflare AI + Vectorize — product similarity search (find_similar_product tool).
+# Usa qwen3-embedding-0.6b (1024 dim) per embedding testuale titolo+descrizione prodotti.
+# Per aggiornare l'indice: npx ts-node --esm scripts/indexProducts.ts
+
+[ai]
+binding = "AI"
+
+[[vectorize]]
+binding = "PRODUCT_VECTORS"
+index_name = "zuiki-products"
 
 # Secrets da configurare con `wrangler secret put <NAME>`:
 #   ANTHROPIC_API_KEY

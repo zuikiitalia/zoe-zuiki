@@ -1,8 +1,9 @@
 /**
  * Script di indicizzazione prodotti Zuiki su Cloudflare Vectorize.
+ * Usa embedding testuale (qwen3-embedding-0.6b) sul titolo prodotto + body_html.
  *
  * SETUP UNA-TANTUM (da eseguire una sola volta):
- *   wrangler vectorize create zuiki-products --dimensions=512 --metric=cosine
+ *   wrangler vectorize create zuiki-products --dimensions=1024 --metric=cosine
  *   wrangler vectorize create-metadata-index zuiki-products --property-name=sku_suffix --type=string
  *
  * USO:
@@ -12,7 +13,7 @@
  *   CLOUDFLARE_API_TOKEN=xxx \
  *   npx ts-node --esm scripts/indexProducts.ts
  *
- * AGGIORNAMENTO INCREMETALE: rieseguire lo script — Vectorize fa upsert quindi
+ * AGGIORNAMENTO INCREMENTALE: rieseguire lo script — Vectorize fa upsert quindi
  * i prodotti già indicizzati vengono aggiornati, quelli nuovi aggiunti.
  */
 
@@ -21,11 +22,13 @@ const SHOPIFY_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN!;
 const CF_ACCOUNT = process.env.CLOUDFLARE_ACCOUNT_ID!;
 const CF_TOKEN = process.env.CLOUDFLARE_API_TOKEN!;
 const VECTORIZE_INDEX = 'zuiki-products';
-const BATCH_SIZE = 20; // vettori per chiamata upsert Vectorize (max 1000, ma teniamo basso per CF AI rate limit)
+const BATCH_SIZE = 50;
+const CF_EMBED_MODEL = '@cf/qwen/qwen3-embedding-0.6b';
 
 interface ShopifyProduct {
   handle: string;
   title: string;
+  descriptionHtml: string;
   onlineStoreUrl: string | null;
   featuredImage: { url: string } | null;
   variants: {
@@ -58,14 +61,13 @@ async function shopifyFetch(query: string, variables: Record<string, unknown>): 
   return json.data;
 }
 
-/** Recupera tutti i prodotti Shopify con paginazione. */
 async function* fetchAllProducts(): AsyncGenerator<ShopifyProduct> {
   const GQL = `
     query Products($first: Int!, $after: String) {
       products(first: $first, after: $after) {
         edges {
           node {
-            handle title onlineStoreUrl
+            handle title descriptionHtml onlineStoreUrl
             featuredImage { url }
             variants(first: 1) {
               edges { node { sku } }
@@ -86,53 +88,39 @@ async function* fetchAllProducts(): AsyncGenerator<ShopifyProduct> {
       yield edge.node;
     }
     cursor = data.products.pageInfo.hasNextPage ? data.products.pageInfo.endCursor : null;
-    // Rate limit Shopify: 2 req/s (piano Plus). Pausa di 600ms.
     if (cursor) await sleep(600);
   } while (cursor);
 }
 
-/** Estrae il suffisso SKU (ultimi 2 char, o 1 se la variante finisce con C=Collana). */
 function extractSkuSuffix(sku: string): string {
   if (!sku) return '';
   const upper = sku.toUpperCase().replace(/[^A-Z]/g, '');
-  // Suffissi a 2 char sono più comuni; controlla prima quelli
-  // (es. CA, PA, MA...). Se non matcha un suffisso noto, prova 1 char.
   return upper.slice(-2);
 }
 
-/** Scarica un'immagine e ritorna i byte raw. */
-async function fetchImageBytes(url: string): Promise<number[] | null> {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const buf = await res.arrayBuffer();
-    return Array.from(new Uint8Array(buf));
-  } catch {
-    return null;
-  }
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
 }
 
-/** Chiama CF AI CLIP per ottenere l'embedding di un'immagine. */
-async function getCfClipEmbedding(imageBytes: number[]): Promise<number[] | null> {
+async function getTextEmbedding(text: string): Promise<number[] | null> {
   const res = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/@cf/openai/clip-vit-base-patch32`,
+    `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/ai/run/${CF_EMBED_MODEL}`,
     {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${CF_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ image: imageBytes }),
+      body: JSON.stringify({ text }),
     }
   );
   if (!res.ok) {
     console.warn(`  CF AI ${res.status}: ${await res.text()}`);
     return null;
   }
-  const json = await res.json() as { result?: { data?: number[] } | number[]; success: boolean };
+  const json = await res.json() as { result?: { data?: number[][] }; success: boolean };
   if (!json.success) return null;
-  const data = Array.isArray(json.result) ? json.result : (json.result as { data?: number[] })?.data;
-  return data ?? null;
+  return json.result?.data?.[0] ?? null;
 }
 
 interface VectorizeUpsertPayload {
@@ -141,7 +129,6 @@ interface VectorizeUpsertPayload {
   metadata: Record<string, string>;
 }
 
-/** Inserisce/aggiorna vettori in Cloudflare Vectorize (formato NDJSON). */
 async function upsertVectors(vectors: VectorizeUpsertPayload[]): Promise<void> {
   const ndjson = vectors.map((v) => JSON.stringify(v)).join('\n');
   const res = await fetch(
@@ -170,7 +157,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log('Inizio indicizzazione prodotti Zuiki su Vectorize...');
+  console.log('Inizio indicizzazione prodotti Zuiki su Vectorize (text embedding)...');
   let total = 0;
   let indexed = 0;
   let skipped = 0;
@@ -180,27 +167,16 @@ async function main() {
     total++;
     const sku = product.variants.edges[0]?.node.sku ?? '';
     const skuSuffix = extractSkuSuffix(sku);
-    const imageUrl = product.featuredImage?.url;
+    const description = stripHtml(product.descriptionHtml ?? '');
+    const textToEmbed = description
+      ? `${product.title}. ${description}`
+      : product.title;
 
-    if (!imageUrl) {
-      console.log(`  [SKIP] ${product.handle} — nessuna immagine`);
-      skipped++;
-      continue;
-    }
-
-    const imageBytes = await fetchImageBytes(imageUrl);
-    if (!imageBytes) {
-      console.log(`  [SKIP] ${product.handle} — download immagine fallito`);
-      skipped++;
-      continue;
-    }
-
-    // Rate limit CF AI: max ~50 req/min sul piano Workers Free/Paid.
-    const embedding = await getCfClipEmbedding(imageBytes);
+    const embedding = await getTextEmbedding(textToEmbed);
     if (!embedding) {
-      console.log(`  [SKIP] ${product.handle} — embedding CLIP fallito`);
+      console.log(`  [SKIP] ${product.handle} — embedding fallito`);
       skipped++;
-      await sleep(2000); // backoff su errori CF AI
+      await sleep(1000);
       continue;
     }
 
@@ -213,7 +189,7 @@ async function main() {
         sku: sku,
         sku_suffix: skuSuffix,
         url: product.onlineStoreUrl ?? `https://www.zuiki.it/products/${product.handle}`,
-        image_url: imageUrl,
+        image_url: product.featuredImage?.url ?? '',
       },
     });
 
@@ -222,13 +198,12 @@ async function main() {
       indexed += batch.length;
       console.log(`  Indicizzati ${indexed} prodotti finora...`);
       batch.length = 0;
-      await sleep(300); // pausa tra batch
+      await sleep(200);
     }
 
-    await sleep(100); // ~10 req/s verso CF AI
+    await sleep(50); // ~20 req/s verso CF AI
   }
 
-  // Flush batch finale
   if (batch.length > 0) {
     await upsertVectors(batch);
     indexed += batch.length;
