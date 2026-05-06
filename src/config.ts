@@ -13,8 +13,10 @@ export interface Env {
   // Se presente e non vuota, Zoe risponde SOLO a questi numeri (modalità test/restricted).
   // Se assente o vuota, Zoe risponde a tutti.
   ALLOWLIST_PHONES?: string;
-  // Cloudflare AI — presente dopo setup wrangler.toml [ai].
+  // URL dello HF Space FashionCLIP (es. https://aldoinnamorato-zuiki-fashion-clip.hf.space).
   // Opzionale: se assente, find_similar_product restituisce solo il link di ricerca.
+  HF_SPACE_URL?: string;
+  // Cloudflare AI — usato come fallback embedding se HF_SPACE_URL non disponibile.
   AI?: Ai;
   // Cloudflare Vectorize — presente dopo setup wrangler.toml [[vectorize]].
   // Richiede anche l'indicizzazione one-time con scripts/indexProducts.ts.

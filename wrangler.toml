@@ -13,18 +13,21 @@ id = "bb4065619661434493b7e4d0fd7a0949"
 [observability]
 enabled = true
 
-# Cloudflare AI + Vectorize — product similarity search (find_similar_product tool).
-# Usa qwen3-embedding-0.6b (1024 dim) per embedding testuale titolo+descrizione prodotti.
-# Per aggiornare l'indice: npx ts-node --esm scripts/indexProducts.ts
-
+# Cloudflare AI — disponibile come fallback (non usato per embeddings principali).
 [ai]
 binding = "AI"
 
+# Vectorize — visual search con FashionCLIP 512-dim.
+# Per aggiornare l'indice: npx ts-node --esm scripts/indexProducts.ts
 [[vectorize]]
 binding = "PRODUCT_VECTORS"
 index_name = "zuiki-products"
 
-# Secrets da configurare con `wrangler secret put <NAME>`:
+# Cron job ogni 30 min per tenere lo HF Space FashionCLIP sveglio (no cold start).
+[triggers]
+crons = ["*/30 * * * *"]
+
+# Secrets da configurare nel Cloudflare Dashboard (Workers & Pages → zoe-zuiki → Settings):
 #   ANTHROPIC_API_KEY
 #   SHOPIFY_CLIENT_ID
 #   SHOPIFY_CLIENT_SECRET
@@ -34,3 +37,4 @@ index_name = "zuiki-products"
 #   WEBHOOK_SECRET             (32 char random — valida i webhook Spoki)
 #   TEAM_EMAIL                 (es. shoponline@zuiki.it)
 #   WHATSAPP_NUMBER            (es. +390230550379)
+#   HF_SPACE_URL               (https://aldoinnamorato-zuiki-fashion-clip.hf.space)

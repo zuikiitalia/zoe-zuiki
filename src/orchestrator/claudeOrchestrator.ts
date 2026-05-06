@@ -15,7 +15,8 @@ import {
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
 import {
-  computeTextEmbedding,
+  computeImageEmbeddingFashionCLIP,
+  computeTextEmbeddingFashionCLIP,
   findSimilarProducts,
 } from '../clients/vectorizeClient';
 import { logger } from '../utils/logger';
@@ -58,7 +59,8 @@ async function executeTool(
   env: Env,
   phone: string,
   name: string,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  clipEmbedding?: number[] | null
 ): Promise<string> {
   try {
     switch (name) {
@@ -87,14 +89,9 @@ async function executeTool(
         const keywords = String(input.search_keywords ?? '').trim();
         const visualDescription = String(input.visual_description ?? '').trim();
 
-        // Link di ricerca testuale (max 2 parole per risultati Shopify).
+        // Link di ricerca testuale (max 2 parole per avere risultati su Shopify).
         const queryWords = keywords.split(/\s+/).slice(0, 2).join('+');
         const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${queryWords}`;
-
-        // Embedding della descrizione visiva dettagliata generata da Claude.
-        // I prodotti nel Vectorize sono indicizzati con descrizioni generate da LLaVA
-        // → stesso spazio semantico italiano → match accurato.
-        const textToEmbed = visualDescription || keywords;
 
         let matchResult: {
           sku: string;
@@ -105,8 +102,17 @@ async function executeTool(
           category: string;
         } | null = null;
 
-        if (env.AI && env.PRODUCT_VECTORS && textToEmbed) {
-          const embedding = await computeTextEmbedding(env, textToEmbed);
+        if (env.HF_SPACE_URL && env.PRODUCT_VECTORS) {
+          // 1) FashionCLIP image embedding dalla foto del cliente (priorità massima)
+          let embedding: number[] | null = clipEmbedding ?? null;
+          let source = embedding ? 'fashion_clip_image' : '';
+
+          // 2) FashionCLIP text embedding dalla visual_description (fallback se no foto)
+          if (!embedding && visualDescription) {
+            embedding = await computeTextEmbeddingFashionCLIP(env, visualDescription);
+            source = 'fashion_clip_text';
+          }
+
           if (embedding) {
             const topMatches = await findSimilarProducts(
               env,
@@ -114,7 +120,8 @@ async function executeTool(
               suffix || undefined,
               3
             );
-            logger.info('visual_search_results', {
+            logger.info('fashion_clip_search', {
+              source,
               count: topMatches.length,
               top_score: topMatches[0]?.similarity,
               suffix: suffix || 'any',
@@ -137,7 +144,7 @@ async function executeTool(
           match: matchResult,
           search_url: searchUrl,
           search_keywords: keywords,
-          visual_search_available: !!env.AI && !!env.PRODUCT_VECTORS,
+          visual_search_available: !!env.HF_SPACE_URL && !!env.PRODUCT_VECTORS,
         });
       }
       case 'open_support_ticket': {
@@ -350,8 +357,15 @@ export async function processMessage(
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
-  // Scarica immagini una sola volta (per Claude content).
+  // Scarica immagini una sola volta (per Claude content e FashionCLIP embedding).
   const downloadedImages = images.length > 0 ? await downloadImages(images, phone) : [];
+
+  // Calcola FashionCLIP embedding dalla prima immagine (usato da find_similar_product).
+  const firstImage = downloadedImages[0];
+  const clipEmbedding =
+    firstImage && env.HF_SPACE_URL
+      ? await computeImageEmbeddingFashionCLIP(env, firstImage.base64)
+      : null;
 
   const firstUserContent = await buildFirstUserContent(userMessage, images, phone, downloadedImages);
   const messages: Anthropic.MessageParam[] = [
@@ -412,7 +426,7 @@ export async function processMessage(
             { tool: block.name, input_keys: Object.keys(block.input as object) },
             phone
           );
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>);
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
