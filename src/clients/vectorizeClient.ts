@@ -12,42 +12,25 @@ export interface SimilarProductMatch {
 }
 
 /**
- * Converte base64 in array di byte (raw image file bytes per CF AI CLIP).
- * CF AI CLIP accetta i byte grezzi del file immagine (JPEG/PNG/WEBP),
- * non i pixel decodificati.
- */
-export function base64ToByteArray(base64: string): number[] {
-  const binary = atob(base64);
-  const result = new Array<number>(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    result[i] = binary.charCodeAt(i);
-  }
-  return result;
-}
-
-/**
- * Calcola l'embedding CLIP di un'immagine tramite Cloudflare AI.
+ * Calcola l'embedding testuale di una query tramite Cloudflare AI (qwen3-embedding-0.6b).
  * Restituisce null se il binding AI non è disponibile o la call fallisce.
- *
- * Setup richiesto (una-tantum): il binding `AI` deve essere presente in wrangler.toml.
  */
-export async function computeImageEmbedding(
+export async function computeTextEmbedding(
   env: Env,
-  imageBytes: number[]
+  text: string
 ): Promise<number[] | null> {
   if (!env.AI) return null;
   try {
-    // CF AI workers-types non tipizza CLIP in feature-extraction mode.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await (env.AI as any).run('@cf/openai/clip-vit-base-patch32', {
-      image: imageBytes,
-    }) as { data: number[] } | number[];
-    // CF AI può restituire { data: [...] } o direttamente l'array.
-    const embedding = Array.isArray(result) ? result : result?.data;
+    const result = await (env.AI as any).run('@cf/qwen/qwen3-embedding-0.6b', {
+      text,
+    }) as { data: number[][] } | number[][];
+    const data = Array.isArray(result) ? result : result?.data;
+    const embedding = Array.isArray(data?.[0]) ? data[0] : null;
     if (!embedding || embedding.length === 0) return null;
     return embedding;
   } catch (err) {
-    logger.error('clip_embedding_failed', {
+    logger.error('text_embedding_failed', {
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
@@ -55,12 +38,8 @@ export async function computeImageEmbedding(
 }
 
 /**
- * Interroga Vectorize con un embedding immagine e ritorna i prodotti più simili.
+ * Interroga Vectorize con un embedding testuale e ritorna i prodotti più simili.
  * Se skuSuffix è fornito, filtra per categoria (es. "CA" = solo camicie).
- *
- * Setup richiesto (una-tantum):
- *   wrangler vectorize create zuiki-products --dimensions=512 --metric=cosine
- *   wrangler vectorize create-metadata-index zuiki-products --property-name=sku_suffix --type=string
  */
 export async function findSimilarProducts(
   env: Env,

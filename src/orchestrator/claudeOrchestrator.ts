@@ -15,9 +15,8 @@ import {
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
 import {
-  computeImageEmbedding,
+  computeTextEmbedding,
   findSimilarProducts,
-  base64ToByteArray,
 } from '../clients/vectorizeClient';
 import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
@@ -59,8 +58,7 @@ async function executeTool(
   env: Env,
   phone: string,
   name: string,
-  input: Record<string, unknown>,
-  imageEmbeddings: number[][] = []
+  input: Record<string, unknown>
 ): Promise<string> {
   try {
     switch (name) {
@@ -88,11 +86,11 @@ async function executeTool(
         const suffix = String(input.category_suffix ?? '').toUpperCase().trim();
         const keywords = String(input.search_keywords ?? '').trim();
 
-        // Costruisce il link di ricerca semantica (max 4 parole, URL-safe con +).
-        const queryWords = keywords.split(/\s+/).slice(0, 4).join('+');
+        // Costruisce il link di ricerca (max 2 parole per avere risultati su Shopify).
+        const queryWords = keywords.split(/\s+/).slice(0, 2).join('+');
         const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${queryWords}`;
 
-        // Visual match: usa l'embedding CLIP del primo frame disponibile.
+        // Text embedding match: embedda le keywords e cerca nel catalogo Vectorize.
         let matchResult: {
           sku: string;
           title: string;
@@ -102,28 +100,31 @@ async function executeTool(
           category: string;
         } | null = null;
 
-        if (imageEmbeddings.length > 0) {
-          const topMatches = await findSimilarProducts(
-            env,
-            imageEmbeddings[0]!,
-            suffix || undefined,
-            3
-          );
-          logger.info('visual_search_results', {
-            count: topMatches.length,
-            top_score: topMatches[0]?.similarity,
-            suffix: suffix || 'any',
-          }, phone);
-          const best = topMatches[0];
-          if (best) {
-            matchResult = {
-              sku: best.sku,
-              title: best.title,
-              url: best.url,
-              image_url: best.image_url,
-              similarity_percent: Math.round(best.similarity * 100),
-              category: getCategoryName(best.sku_suffix),
-            };
+        if (env.AI && env.PRODUCT_VECTORS && keywords) {
+          const embedding = await computeTextEmbedding(env, keywords);
+          if (embedding) {
+            const topMatches = await findSimilarProducts(
+              env,
+              embedding,
+              suffix || undefined,
+              3
+            );
+            logger.info('text_search_results', {
+              count: topMatches.length,
+              top_score: topMatches[0]?.similarity,
+              suffix: suffix || 'any',
+            }, phone);
+            const best = topMatches[0];
+            if (best) {
+              matchResult = {
+                sku: best.sku,
+                title: best.title,
+                url: best.url,
+                image_url: best.image_url,
+                similarity_percent: Math.round(best.similarity * 100),
+                category: getCategoryName(best.sku_suffix),
+              };
+            }
           }
         }
 
@@ -131,7 +132,7 @@ async function executeTool(
           match: matchResult,
           search_url: searchUrl,
           search_keywords: keywords,
-          visual_search_available: imageEmbeddings.length > 0 && !!env.PRODUCT_VECTORS,
+          visual_search_available: !!env.AI && !!env.PRODUCT_VECTORS,
         });
       }
       case 'open_support_ticket': {
@@ -329,7 +330,7 @@ async function buildFirstUserContent(
   // Sempre un text block (anche solo con preamble e nota immagine)
   const textPart = text
     ? `${nowLine}\n\n${text}`
-    : `${nowLine}\n\n[Il cliente ha mandato solo un'immagine senza testo. Guarda cosa c'è e rispondi di conseguenza: se è uno screenshot di un ordine, leggi il numero d'ordine e chiedi l'email per verificare. Se è una foto di un articolo, identifica colore/tipo e cerca un articolo simile nel catalogo Zuiki con search_products. Se è una foto di outfit, suggerisci abbinamenti dal catalogo Zuiki.]`;
+    : `${nowLine}\n\n[Il cliente ha mandato solo un'immagine senza testo. Guarda cosa c'è e rispondi di conseguenza: se è uno screenshot di un ordine, leggi il numero d'ordine e chiedi l'email per verificare. Se è una foto di un capo/accessorio (su modella, da sito, da social, o foto personale), usa find_similar_product per cercare qualcosa di simile nel catalogo Zuiki. Se è una foto di outfit, suggerisci abbinamenti dal catalogo con search_products.]`;
   blocks.push({ type: 'text', text: textPart });
   return blocks;
 }
@@ -344,20 +345,8 @@ export async function processMessage(
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
-  // Scarica immagini una sola volta (riusate per Claude content + CLIP embedding).
+  // Scarica immagini una sola volta (per Claude content).
   const downloadedImages = images.length > 0 ? await downloadImages(images, phone) : [];
-
-  // Calcola embedding CLIP in parallelo (solo se AI + Vectorize sono disponibili).
-  let imageEmbeddings: number[][] = [];
-  if (downloadedImages.length > 0 && env.AI && env.PRODUCT_VECTORS) {
-    const embs = await Promise.all(
-      downloadedImages.map((img) => computeImageEmbedding(env, base64ToByteArray(img.base64)))
-    );
-    imageEmbeddings = embs.filter((e): e is number[] => e !== null);
-    if (imageEmbeddings.length > 0) {
-      logger.info('clip_embeddings_ready', { count: imageEmbeddings.length }, phone);
-    }
-  }
 
   const firstUserContent = await buildFirstUserContent(userMessage, images, phone, downloadedImages);
   const messages: Anthropic.MessageParam[] = [
@@ -418,7 +407,7 @@ export async function processMessage(
             { tool: block.name, input_keys: Object.keys(block.input as object) },
             phone
           );
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, imageEmbeddings);
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>);
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,
