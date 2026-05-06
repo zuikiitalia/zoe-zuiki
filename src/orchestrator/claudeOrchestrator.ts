@@ -88,8 +88,8 @@ async function executeTool(
         const suffix = String(input.category_suffix ?? '').toUpperCase().trim();
         const keywords = String(input.search_keywords ?? '').trim();
 
-        // Costruisce il link di ricerca semantica (max 4 parole, URL-safe con +).
-        const queryWords = keywords.split(/\s+/).slice(0, 4).join('+');
+        // Costruisce il link di ricerca semantica (max 2 parole per avere risultati su Shopify).
+        const queryWords = keywords.split(/\s+/).slice(0, 2).join('+');
         const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${queryWords}`;
 
         // Visual match: usa l'embedding CLIP del primo frame disponibile.
@@ -329,7 +329,7 @@ async function buildFirstUserContent(
   // Sempre un text block (anche solo con preamble e nota immagine)
   const textPart = text
     ? `${nowLine}\n\n${text}`
-    : `${nowLine}\n\n[Il cliente ha mandato solo un'immagine senza testo. Guarda cosa c'è e rispondi di conseguenza: se è uno screenshot di un ordine, leggi il numero d'ordine e chiedi l'email per verificare. Se è una foto di un articolo, identifica colore/tipo e cerca un articolo simile nel catalogo Zuiki con search_products. Se è una foto di outfit, suggerisci abbinamenti dal catalogo Zuiki.]`;
+    : `${nowLine}\n\n[Il cliente ha mandato solo un'immagine senza testo. Guarda cosa c'è e rispondi di conseguenza: se è uno screenshot di un ordine, leggi il numero d'ordine e chiedi l'email per verificare. Se è una foto di un capo/accessorio (su modella, da sito, da social, o foto personale), usa find_similar_product per cercare qualcosa di simile nel catalogo Zuiki. Se è una foto di outfit, suggerisci abbinamenti dal catalogo con search_products.]`;
   blocks.push({ type: 'text', text: textPart });
   return blocks;
 }
