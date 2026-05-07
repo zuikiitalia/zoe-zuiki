@@ -118,29 +118,52 @@ async function executeTool(
               env,
               embedding,
               suffix || undefined,
-              3
+              5
             );
             logger.info('fashion_clip_search', {
               source,
               suffix: suffix || 'any',
               visual_description: visualDescription.slice(0, 120),
               count: topMatches.length,
-              top3: topMatches.map(m => ({
+              top3: topMatches.slice(0, 3).map(m => ({
                 handle: m.handle,
                 score: Math.round(m.similarity * 1000) / 1000,
                 title: m.title.slice(0, 40),
               })),
             }, phone);
-            const best = topMatches[0];
-            if (best) {
-              matchResult = {
-                sku: best.sku,
-                title: best.title,
-                url: best.url,
-                image_url: best.image_url,
-                similarity_percent: Math.round(best.similarity * 100),
-                category: getCategoryName(best.sku_suffix),
-              };
+
+            // Scegli il primo match con disponibilità > 0
+            for (const match of topMatches) {
+              try {
+                const detail = await getProductByHandle(env, match.handle);
+                const hasStock = (detail.total_inventory ?? 0) > 0;
+                logger.info('availability_check', {
+                  handle: match.handle,
+                  total_inventory: detail.total_inventory,
+                  available: hasStock,
+                }, phone);
+                if (!hasStock) continue;
+                matchResult = {
+                  sku: match.sku,
+                  title: match.title,
+                  url: match.url,
+                  image_url: match.image_url,
+                  similarity_percent: Math.round(match.similarity * 100),
+                  category: getCategoryName(match.sku_suffix),
+                };
+                break;
+              } catch {
+                // Se Shopify non risponde, usa il match senza check
+                matchResult = {
+                  sku: match.sku,
+                  title: match.title,
+                  url: match.url,
+                  image_url: match.image_url,
+                  similarity_percent: Math.round(match.similarity * 100),
+                  category: getCategoryName(match.sku_suffix),
+                };
+                break;
+              }
             }
           }
         }
