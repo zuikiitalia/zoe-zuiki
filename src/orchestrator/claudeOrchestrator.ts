@@ -99,6 +99,7 @@ async function executeTool(
           url: string;
           image_url: string;
           category: string;
+          similarity_percent: number;
         } | null = null;
 
         if (env.HF_SPACE_URL && env.PRODUCT_VECTORS) {
@@ -148,6 +149,7 @@ async function executeTool(
                   url: match.url,
                   image_url: match.image_url,
                   category: getCategoryName(match.sku_suffix),
+                  similarity_percent: Math.round(match.similarity * 100),
                 };
                 break;
               } catch {
@@ -158,6 +160,7 @@ async function executeTool(
                   url: match.url,
                   image_url: match.image_url,
                   category: getCategoryName(match.sku_suffix),
+                  similarity_percent: Math.round(match.similarity * 100),
                 };
                 break;
               }
