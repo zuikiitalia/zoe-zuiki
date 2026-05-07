@@ -122,9 +122,14 @@ async function executeTool(
             );
             logger.info('fashion_clip_search', {
               source,
-              count: topMatches.length,
-              top_score: topMatches[0]?.similarity,
               suffix: suffix || 'any',
+              visual_description: visualDescription.slice(0, 120),
+              count: topMatches.length,
+              top3: topMatches.map(m => ({
+                handle: m.handle,
+                score: Math.round(m.similarity * 1000) / 1000,
+                title: m.title.slice(0, 40),
+              })),
             }, phone);
             const best = topMatches[0];
             if (best) {
@@ -366,6 +371,12 @@ export async function processMessage(
     firstImage && env.HF_SPACE_URL
       ? await computeImageEmbeddingFashionCLIP(env, firstImage.base64)
       : null;
+  logger.info('clip_embedding', {
+    has_image: !!firstImage,
+    hf_space_url: !!env.HF_SPACE_URL,
+    embedding_dim: clipEmbedding?.length ?? 0,
+    success: !!clipEmbedding,
+  }, phone);
 
   const firstUserContent = await buildFirstUserContent(userMessage, images, phone, downloadedImages);
   const messages: Anthropic.MessageParam[] = [
@@ -423,7 +434,7 @@ export async function processMessage(
         if (block.type === 'tool_use') {
           logger.info(
             'tool_call',
-            { tool: block.name, input_keys: Object.keys(block.input as object) },
+            { tool: block.name, input: block.input },
             phone
           );
           const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding);
