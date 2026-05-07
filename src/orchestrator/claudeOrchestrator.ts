@@ -98,7 +98,6 @@ async function executeTool(
           title: string;
           url: string;
           image_url: string;
-          similarity_percent: number;
           category: string;
         } | null = null;
 
@@ -148,7 +147,6 @@ async function executeTool(
                   title: match.title,
                   url: match.url,
                   image_url: match.image_url,
-                  similarity_percent: Math.round(match.similarity * 100),
                   category: getCategoryName(match.sku_suffix),
                 };
                 break;
@@ -159,7 +157,6 @@ async function executeTool(
                   title: match.title,
                   url: match.url,
                   image_url: match.image_url,
-                  similarity_percent: Math.round(match.similarity * 100),
                   category: getCategoryName(match.sku_suffix),
                 };
                 break;
