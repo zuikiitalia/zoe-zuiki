@@ -52,15 +52,15 @@ function extractInbound(
 
   const contentType = String(data.content_type ?? message.type ?? p.type ?? 'Text');
 
-  // Accettiamo Text, Image (+ possibili altri media future-proof).
-  const isSupported = /^(text|image)$/i.test(contentType);
+  // Accettiamo Text, Image e Audio (le note vocali vengono trascritte in processAsync).
+  const isSupported = /^(text|image|audio)$/i.test(contentType);
   if (!isSupported) {
     // Per ora non gestiamo audio/video/document: accettiamo solo text/image.
     // Altri tipi: ignoriamo (al più Zoe potrebbe rispondere con un fallback, ma è comportamento da concordare).
     return null;
   }
 
-  // Estrai URL immagini da mediamessage_set se presente
+  // Estrai URL media da mediamessage_set (immagini e audio)
   const images: string[] = [];
   const mediaSet = data.mediamessage_set;
   if (Array.isArray(mediaSet)) {
@@ -68,8 +68,13 @@ function extractInbound(
       if (!m || typeof m !== 'object') continue;
       const media = (m as Record<string, unknown>).media;
       const mContentType = (m as Record<string, unknown>).content_type as string | undefined;
-      if (typeof media === 'string' && mContentType && /^image\//i.test(mContentType)) {
-        images.push(media);
+      if (typeof media === 'string') {
+        const isImg = mContentType && /^image\//i.test(mContentType);
+        const isAudioMedia = mContentType && /^audio\//i.test(mContentType);
+        const isTopLevelAudio = /^audio$/i.test(contentType);
+        if (isImg || isAudioMedia || isTopLevelAudio) {
+          images.push(media);
+        }
       }
     }
   }
@@ -112,7 +117,37 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       });
       return;
     }
-    const { phone, text, images, contentType } = extracted;
+    let { phone, text, images, contentType } = extracted;
+
+    // Nota vocale: trascrive con Cloudflare Whisper e tratta come testo normale
+    if (/^audio$/i.test(contentType) && env.AI) {
+      const audioUrl = extracted.images[0] ?? null; // audio URL in images array
+      if (audioUrl) {
+        try {
+          const audioRes = await fetch(audioUrl);
+          if (audioRes.ok) {
+            const buf = await audioRes.arrayBuffer();
+            const result = await env.AI.run('@cf/openai/whisper', {
+              audio: Array.from(new Uint8Array(buf)),
+            }) as { text?: string };
+            const transcribed = result?.text?.trim();
+            if (transcribed) {
+              logger.info('voice_transcribed', { chars: transcribed.length }, phone);
+              text = transcribed;
+              images = [];
+              contentType = 'Text';
+            }
+          }
+        } catch (err) {
+          logger.error('voice_transcription_failed', {
+            error: err instanceof Error ? err.message : String(err),
+          }, phone);
+          return; // non rispondere se trascrizione fallisce
+        }
+      }
+      // Se non c'è URL audio o trascrizione vuota, ignora
+      if (!text) return;
+    }
 
     if (!isPhoneAllowed(phone, env.ALLOWLIST_PHONES)) {
       logger.info('phone_not_in_allowlist', { content_type: contentType }, phone);
