@@ -397,6 +397,7 @@ export interface ProductDetail {
     available: boolean;
     inventory: number | null;
     price: string;
+    barcode: string | null;
   }>;
 }
 
@@ -410,7 +411,7 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
           maxVariantPrice { amount currencyCode }
         }
         variants(first: 50) {
-          edges { node { title availableForSale inventoryQuantity price } }
+          edges { node { title availableForSale inventoryQuantity price barcode } }
         }
       }
     }`;
@@ -424,7 +425,7 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
       priceRangeV2: ProductDetail['price_range'];
       variants: {
         edges: Array<{
-          node: { title: string; availableForSale: boolean; inventoryQuantity: number | null; price: string };
+          node: { title: string; availableForSale: boolean; inventoryQuantity: number | null; price: string; barcode: string | null };
         }>;
       };
     } | null;
@@ -445,6 +446,7 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
       available: e.node.availableForSale,
       inventory: e.node.inventoryQuantity,
       price: e.node.price,
+      barcode: e.node.barcode,
     })),
   };
 }

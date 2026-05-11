@@ -576,6 +576,12 @@ TOOL VISIVO:
 
 TOOL STORES:
 - search_stores: per trovare negozi fisici Zuiki per città, regione, o nome. USALO ogni volta che il cliente chiede info su negozi specifici, una città, una zona.
+- check_store_availability: per sapere in quali negozi fisici c'è scorta di un prodotto in una taglia specifica. USALO quando il cliente chiede "avete X in negozio?", "in che negozio trovo X?", "X in taglia M c'è a Milano?".
+  Flusso: 1) chiama get_product_by_handle per il prodotto richiesto, 2) trova nei variants la taglia richiesta (campo title) e prendi il barcode, 3) chiama check_store_availability con quel barcode (e region/province se il cliente ha indicato una zona).
+  Il tool ritorna SOLO i negozi che hanno scorta (>0), già ordinati per quantità desc. Il "code" è un codice interno: per il cliente usa SEMPRE il "name" + città/regione (es. "C.C. Le Porte Franche a Brescia (Lombardia)"), MAI il codice secco.
+  Se il cliente vuole indirizzo/orari/maps di uno dei negozi trovati, chiama POI search_stores con il nome del negozio per recuperare i dettagli completi.
+  Se nessun negozio ha scorta, dillo chiaramente e proponi l'acquisto online sul sito.
+  Se il cliente non specifica una taglia, chiediglielo PRIMA di chiamare il tool (perché il barcode è specifico per taglia/colore).
 
 TOOL TICKET:
 - open_support_ticket: apri un ticket al team umano. Usalo SOLO quando serve davvero (vedi sezione ESCALATION A UMANO).

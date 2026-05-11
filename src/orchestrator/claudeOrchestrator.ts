@@ -14,6 +14,7 @@ import {
   ShopifyNotInstalledError,
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
+import { checkBarcodeAvailability } from '../clients/siacloudClient';
 import {
   computeImageEmbeddingFashionCLIP,
   computeTextEmbeddingFashionCLIP,
@@ -137,6 +138,30 @@ async function executeTool(
       }
       case 'search_stores': {
         return JSON.stringify(await searchStores(input));
+      }
+      case 'check_store_availability': {
+        const barcode = String(input.barcode ?? '').trim();
+        if (!barcode) return JSON.stringify({ error: 'missing_barcode' });
+        const regionFilter = (input.region as string | undefined)?.toLowerCase().trim();
+        const provinceFilter = (input.province as string | undefined)?.toLowerCase().trim();
+        const maxResults = Math.max(1, Math.min(50, Number(input.max_results) || 15));
+
+        const avail = await checkBarcodeAvailability(barcode);
+        let stores = avail.stores;
+        if (regionFilter) stores = stores.filter((s) => s.region.toLowerCase().includes(regionFilter));
+        if (provinceFilter) stores = stores.filter((s) => s.province.toLowerCase().includes(provinceFilter));
+        const truncated = stores.length > maxResults;
+        stores = stores.slice(0, maxResults);
+        logger.info('check_store_availability', {
+          barcode, total: avail.total, returned: stores.length, region: regionFilter, province: provinceFilter,
+        }, phone);
+        return JSON.stringify({
+          found: avail.found,
+          barcode,
+          total_units_nationwide: avail.total,
+          stores_with_stock: stores,
+          truncated,
+        });
       }
       case 'find_similar_product': {
         const suffix = String(input.category_suffix ?? '').toUpperCase().trim();
