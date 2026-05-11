@@ -68,7 +68,8 @@ async function searchStores(input: Record<string, unknown>): Promise<Record<stri
 
   let stores: CdnStore[] = [];
   try {
-    const res = await fetch(STORES_CDN_URL, { cf: { cacheTtl: 3600 } } as RequestInit);
+    const res = await fetch(STORES_CDN_URL, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`CDN ${res.status}`);
     stores = await res.json() as CdnStore[];
   } catch {
     return { error: 'stores_fetch_failed', found: 0, stores: [] };

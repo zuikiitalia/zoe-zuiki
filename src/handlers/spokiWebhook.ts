@@ -52,8 +52,8 @@ function extractInbound(
 
   const contentType = String(data.content_type ?? message.type ?? p.type ?? 'Text');
 
-  // Accettiamo Text, Image e Audio (le note vocali vengono trascritte in processAsync).
-  const isSupported = /^(text|image|audio)$/i.test(contentType);
+  // Accettiamo Text, Image e Audio/Voice (le note vocali vengono trascritte in processAsync).
+  const isSupported = /^(text|image|audio|voice)$/i.test(contentType) || /^audio\//i.test(contentType);
   if (!isSupported) {
     // Per ora non gestiamo audio/video/document: accettiamo solo text/image.
     // Altri tipi: ignoriamo (al più Zoe potrebbe rispondere con un fallback, ma è comportamento da concordare).
@@ -120,7 +120,7 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
     let { phone, text, images, contentType } = extracted;
 
     // Nota vocale: trascrive con Cloudflare Whisper e tratta come testo normale
-    if (/^audio$/i.test(contentType) && env.AI) {
+    if ((/^(audio|voice)$/i.test(contentType) || /^audio\//i.test(contentType)) && env.AI) {
       const audioUrl = extracted.images[0] ?? null; // audio URL in images array
       if (audioUrl) {
         try {
