@@ -20,39 +20,49 @@ app.get('/debug/siacloud-discover', async (c) => {
   const store = 'PFRAN';
 
   const url = `${base}/siacloudhelper/inventory`;
+  const hform = { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' };
   const hjson = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+
+  // Kohana legge $_POST solo da form-urlencoded (non JSON): proviamo prima form-encoded
+  function fe(params: Record<string, string>): string {
+    return new URLSearchParams(params).toString();
+  }
+
   const attempts: Array<{ name: string; method: string; url: string; headers?: Record<string,string>; body?: string }> = [
-    // POST normale (creazione/scrittura) con vari parametri
-    { name: 'POST minimal token', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token }) },
-    { name: 'POST con shop_id', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, shop_id: store, barcode }) },
-    { name: 'POST con magazzino', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, magazzino: store, barcode }) },
-    { name: 'POST con punto_vendita', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, punto_vendita: store, barcode }) },
-    { name: 'POST cod_negozio', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, cod_negozio: store, barcode }) },
-    // Forse barcode/store come numeri o oggetti
-    { name: 'POST barcode num', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, barcodes: [Number(barcode)], stores: [store] }) },
-    { name: 'POST nested map', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, query: { [barcode]: [store] } }) },
-    // Forse vuole la lista dei prodotti come campo specifico Siacloud
-    { name: 'POST articoli/negozi', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, articoli: [barcode], negozi: [store] }) },
-    { name: 'POST eans/punti_vendita', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, eans: [barcode], punti_vendita: [store] }) },
-    // Forse il "store" non è "PFRAN" ma un id numerico, e PFRAN è un codice diverso
-    { name: 'POST barcode + storeCode', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, barcode, storeCode: store }) },
-    { name: 'POST barcode + store_code', method: 'POST', url, headers: hjson,
-      body: JSON.stringify({ token, barcode, store_code: store }) },
-    // Override GET con varie struttuari
-    { name: 'override GET singular', method: 'POST', url, headers: { ...hjson, 'X-HTTP-Method-Override': 'GET' },
+    // === FORM-ENCODED (Kohana $_POST) ===
+    { name: 'FORM token only', method: 'POST', url, headers: hform,
+      body: fe({ token }) },
+    { name: 'FORM barcode+store', method: 'POST', url, headers: hform,
+      body: fe({ token, barcode, store }) },
+    { name: 'FORM barcode+negozio', method: 'POST', url, headers: hform,
+      body: fe({ token, barcode, negozio: store }) },
+    { name: 'FORM barcode+cod_negozio', method: 'POST', url, headers: hform,
+      body: fe({ token, barcode, cod_negozio: store }) },
+    { name: 'FORM barcode+punto_vendita', method: 'POST', url, headers: hform,
+      body: fe({ token, barcode, punto_vendita: store }) },
+    { name: 'FORM ean+negozio', method: 'POST', url, headers: hform,
+      body: fe({ token, ean: barcode, negozio: store }) },
+    { name: 'FORM codice_barre+negozio', method: 'POST', url, headers: hform,
+      body: fe({ token, codice_barre: barcode, negozio: store }) },
+    { name: 'FORM articolo+negozio', method: 'POST', url, headers: hform,
+      body: fe({ token, articolo: barcode, negozio: store }) },
+    // Forse array PHP: barcode[]=... negozi[]=...
+    { name: 'FORM barcodes[]+negozi[]', method: 'POST', url, headers: hform,
+      body: `token=${encodeURIComponent(token)}&barcodes[]=${encodeURIComponent(barcode)}&negozi[]=${encodeURIComponent(store)}` },
+    { name: 'FORM articoli[]+negozi[]', method: 'POST', url, headers: hform,
+      body: `token=${encodeURIComponent(token)}&articoli[]=${encodeURIComponent(barcode)}&negozi[]=${encodeURIComponent(store)}` },
+    // GET con query string
+    { name: 'GET query barcode+store', method: 'GET',
+      url: `${url}?token=${encodeURIComponent(token)}&barcode=${encodeURIComponent(barcode)}&store=${encodeURIComponent(store)}` },
+    { name: 'GET query ean+negozio', method: 'GET',
+      url: `${url}?token=${encodeURIComponent(token)}&ean=${encodeURIComponent(barcode)}&negozio=${encodeURIComponent(store)}` },
+    // === JSON (php://input) fallback ===
+    { name: 'JSON barcode+store', method: 'POST', url, headers: hjson,
       body: JSON.stringify({ token, barcode, store }) },
-    { name: 'override GET shop_id', method: 'POST', url, headers: { ...hjson, 'X-HTTP-Method-Override': 'GET' },
-      body: JSON.stringify({ token, shop_id: store, barcode }) },
+    { name: 'JSON barcode+negozio', method: 'POST', url, headers: hjson,
+      body: JSON.stringify({ token, barcode, negozio: store }) },
+    { name: 'JSON articoli[]+negozi[]', method: 'POST', url, headers: hjson,
+      body: JSON.stringify({ token, articoli: [barcode], negozi: [store] }) },
   ];
 
   const results = [];
