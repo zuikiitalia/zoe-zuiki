@@ -21,37 +21,91 @@ import {
 } from '../clients/vectorizeClient';
 import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
-import { ZUIKI_STORES } from '../data/stores';
 import { getCategoryName } from '../data/skuSuffixes';
 
-function searchStores(input: Record<string, unknown>) {
+const STORES_CDN_URL = 'https://cdn.shopify.com/s/files/1/0624/0642/6862/files/stores.json?v=1774869600';
+
+interface CdnStore {
+  r: string; p: string; n: string; t: string;
+  a: string; c: string; tel: number;
+  la: string; lo: string;
+  hw: string; hs: string; hd: string;
+  m: string;
+}
+
+function parseHour(s: string): number {
+  // "9.00" → 9.0, "21.00" → 21.0, "CHIUSO" / "" → -1
+  if (!s || s.toUpperCase().includes('CHIUSO')) return -1;
+  return parseFloat(s.replace(',', '.'));
+}
+
+function isOpenNow(hw: string, hs: string, hd: string): { open: boolean; closes_at: string | null } {
+  const now = new Date();
+  const rome = new Intl.DateTimeFormat('it-IT', {
+    timeZone: 'Europe/Rome', hour: 'numeric', minute: 'numeric', weekday: 'short', hour12: false,
+  }).formatToParts(now);
+  const weekday = rome.find(p => p.type === 'weekday')?.value?.toLowerCase() ?? '';
+  const h = parseInt(rome.find(p => p.type === 'hour')?.value ?? '0', 10);
+  const m = parseInt(rome.find(p => p.type === 'minute')?.value ?? '0', 10);
+  const current = h + m / 60;
+
+  const isSun = weekday.startsWith('dom');
+  const isSat = weekday.startsWith('sab');
+  const hoursStr = isSun ? hd : isSat ? hs : hw;
+  const parts = hoursStr.split('-');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return { open: false, closes_at: null };
+  const openH = parseHour(parts[0]);
+  const closeH = parseHour(parts[1]);
+  if (openH < 0 || closeH < 0) return { open: false, closes_at: null };
+  const isOpen = current >= openH && current < closeH;
+  return { open: isOpen, closes_at: isOpen ? parts[1].trim() : null };
+}
+
+async function searchStores(input: Record<string, unknown>): Promise<Record<string, unknown>> {
   const city = (input.city as string | undefined)?.toLowerCase().trim();
   const region = (input.region as string | undefined)?.toLowerCase().trim();
   const query = (input.query as string | undefined)?.toLowerCase().trim();
 
-  const matches = ZUIKI_STORES.filter((s) => {
-    if (city && !s.city.toLowerCase().includes(city)) return false;
-    if (region && !s.region.toLowerCase().includes(region)) return false;
+  let stores: CdnStore[] = [];
+  try {
+    const res = await fetch(STORES_CDN_URL, { cf: { cacheTtl: 3600 } } as RequestInit);
+    stores = await res.json() as CdnStore[];
+  } catch {
+    return { error: 'stores_fetch_failed', found: 0, stores: [] };
+  }
+
+  const matches = stores.filter((s) => {
+    if (city && !s.c.toLowerCase().includes(city) && !s.n.toLowerCase().includes(city)) return false;
+    if (region && !s.r.toLowerCase().includes(region) && !s.p.toLowerCase().includes(region)) return false;
     if (query) {
-      const hay = `${s.name} ${s.address} ${s.city}`.toLowerCase();
+      const hay = `${s.n} ${s.a} ${s.c} ${s.p} ${s.r}`.toLowerCase();
       if (!hay.includes(query)) return false;
     }
     return true;
   }).slice(0, 15);
 
   return {
-    total_in_catalog: ZUIKI_STORES.length,
+    total_in_catalog: stores.length,
     found: matches.length,
-    stores: matches.map((s) => ({
-      name: s.name,
-      region: s.region,
-      city: s.city,
-      address: s.address,
-      tel: s.tel,
-      hours_weekday: s.hoursWeekday,
-      hours_saturday: s.hoursSat,
-      hours_sunday: s.hoursSun,
-    })),
+    stores: matches.map((s) => {
+      const { open, closes_at } = isOpenNow(s.hw, s.hs, s.hd);
+      return {
+        name: s.n,
+        type: s.t,
+        region: s.r,
+        province: s.p,
+        city: s.c,
+        address: s.a,
+        tel: String(s.tel),
+        hours_weekday: s.hw,
+        hours_saturday: s.hs,
+        hours_sunday: s.hd,
+        maps_url: s.m,
+        is_open_now: open,
+        closes_at,
+        coords: { lat: s.la, lng: s.lo },
+      };
+    }),
   };
 }
 
@@ -81,8 +135,7 @@ async function executeTool(
         return JSON.stringify(res);
       }
       case 'search_stores': {
-        // Questo tool è locale (dati statici in src/data/stores.ts), non chiama API esterne.
-        return JSON.stringify(searchStores(input));
+        return JSON.stringify(await searchStores(input));
       }
       case 'find_similar_product': {
         const suffix = String(input.category_suffix ?? '').toUpperCase().trim();
@@ -176,7 +229,8 @@ async function executeTool(
         });
       }
       case 'open_support_ticket': {
-        const reason = String(input.reason ?? 'other');
+        const category = String(input.category ?? 'altro');
+        const reason = String(input.reason ?? 'altro');
         const details = String(input.details ?? '');
         const urgency = String(input.urgency ?? 'normal');
         const ticketId = `ZOE-${Date.now()}`;
@@ -186,6 +240,7 @@ async function executeTool(
           'ticket_opened',
           {
             ticket_id: ticketId,
+            category,
             reason,
             urgency,
             details,
@@ -199,6 +254,7 @@ async function executeTool(
         try {
           spokiTicketRef = await createSpokiTicket(env, {
             phone,
+            category,
             reason,
             details,
             urgency,
