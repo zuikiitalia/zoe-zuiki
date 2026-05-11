@@ -24,7 +24,7 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
     name: 'search_products',
     description:
-      "Cerca prodotti nel catalogo Zuiki. Usalo quando il cliente chiede 'avete X?' o vuole un'info su un articolo. NOTA: il search di Shopify è full-text sul TITOLO del prodotto, non sui colori delle varianti. I titoli sono in genere generici (es. 'Jeans Push Up', 'Giacca Effetto Pelle') senza il colore. Per max risultati: 1) prima prova con la categoria + caratteristica chiave (es. 'jeans push up' invece di 'jeans nero'), 2) se 0 risultati, riprova con SOLO la categoria (es. 'jeans'). I colori specifici sono varianti, vanno chiesti al cliente sull'articolo trovato.",
+      "Cerca prodotti nel catalogo Zuiki. Usalo quando il cliente chiede 'avete X?' o vuole un'info su un articolo. Se il cliente fornisce uno SKU (codice tipo 'Z8401GI', 'B6E211TS'): passalo DIRETTAMENTE come query — il sistema prova automaticamente sku: filter se la ricerca testuale dà 0 risultati. Per ricerche libere: il search è full-text sul TITOLO (es. 'Jeans Push Up', 'Giacca Effetto Pelle'), non sui colori. Strategia: 1) prova categoria + caratteristica chiave, 2) se 0 risultati riprova con solo la categoria. I colori sono varianti, vanno chiesti al cliente sull'articolo trovato.",
     input_schema: {
       type: 'object',
       properties: {

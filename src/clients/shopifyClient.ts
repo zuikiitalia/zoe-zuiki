@@ -342,7 +342,7 @@ export interface ProductSearchResult {
 }
 
 export async function searchProducts(env: Env, q: string, limit = 5): Promise<ProductSearchResult> {
-  const query = `
+  const gql = `
     query SearchProducts($q: String!, $first: Int!) {
       products(first: $first, query: $q) {
         edges {
@@ -368,8 +368,8 @@ export async function searchProducts(env: Env, q: string, limit = 5): Promise<Pr
       }>;
     };
   };
-  const data = await shopifyGraphQL<Resp>(env, query, { q, first: limit });
-  return {
+
+  const mapResult = (data: Resp): ProductSearchResult => ({
     products: data.products.edges.map((e) => ({
       title: e.node.title,
       handle: e.node.handle,
@@ -378,7 +378,24 @@ export async function searchProducts(env: Env, q: string, limit = 5): Promise<Pr
       price: e.node.priceRangeV2?.minVariantPrice,
       image: e.node.featuredImage?.url ?? null,
     })),
-  };
+  });
+
+  // Prima prova ricerca testuale normale.
+  const data = await shopifyGraphQL<Resp>(env, gql, { q, first: limit });
+  if (data.products.edges.length > 0) return mapResult(data);
+
+  // Se 0 risultati e la query sembra uno SKU (es. "Z8401GI", "B6E211TS"),
+  // riprova con filtro sku: che cerca sulle varianti del prodotto.
+  if (/^[A-Z0-9]{5,12}$/i.test(q.trim())) {
+    const skuData = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${q.trim()}`, first: limit });
+    if (skuData.products.edges.length > 0) return mapResult(skuData);
+    // Secondo tentativo: sku con wildcard tramite prefisso (cerca anche varianti colore/taglia)
+    const skuBase = q.trim().replace(/[-_].*/,'');
+    const skuWild = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${skuBase}`, first: limit });
+    return mapResult(skuWild);
+  }
+
+  return mapResult(data);
 }
 
 export interface ProductDetail {
