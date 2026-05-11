@@ -36,14 +36,42 @@ export async function sendSpokiMessage(env: Env, phone: string, text: string): P
 }
 
 const TICKET_TITLE_BY_REASON: Record<string, string> = {
-  order_cancel: "Richiesta cancellazione ordine",
-  order_modify: "Richiesta modifica ordine",
-  wrong_item: "Articolo errato o difettoso",
-  refund_delay: "Ritardo rimborso",
-  payment_issue: "Problema pagamento",
-  legal_complaint: "Reclamo legale",
-  package_not_delivered: "Pacco non consegnato",
-  other: "Richiesta supporto",
+  // ordine
+  ordine_cancellazione: '📦 Cancellazione ordine',
+  ordine_modifica_indirizzo: '📦 Modifica indirizzo',
+  ordine_modifica_taglia_colore: '📦 Modifica taglia/colore',
+  ordine_stato_non_aggiornato: '📦 Stato ordine non aggiornato',
+  // spedizione
+  spedizione_pacco_non_consegnato: '🚚 Pacco non consegnato',
+  spedizione_ritardo: '🚚 Ritardo spedizione',
+  spedizione_tracking_bloccato: '🚚 Tracking bloccato',
+  spedizione_indirizzo_errato: '🚚 Indirizzo errato',
+  // reso_rimborso
+  rimborso_non_ricevuto: '💶 Rimborso non ricevuto',
+  richiesta_reso: '↩️ Richiesta reso',
+  cambio_taglia_colore: '↩️ Cambio taglia/colore',
+  // prodotto
+  prodotto_articolo_errato: '⚠️ Articolo errato ricevuto',
+  prodotto_difettoso_danneggiato: '⚠️ Articolo difettoso/danneggiato',
+  prodotto_disponibilita_futura: '🔔 Richiesta disponibilità futura',
+  // pagamento
+  pagamento_contestazione_addebito: '💳 Contestazione addebito',
+  pagamento_non_riuscito: '💳 Pagamento non riuscito',
+  pagamento_codice_sconto: '💳 Problema codice sconto',
+  // reclamo
+  reclamo_legale: '🚨 Reclamo legale',
+  reclamo_esperienza_negativa: '💬 Reclamo esperienza',
+  reclamo_social_recensione: '💬 Reclamo social/recensione',
+  // richiesta umano
+  cliente_richiede_operatore: '👤 Cliente chiede operatore',
+  // amministrativo
+  richiesta_fattura: '🧾 Richiesta fattura',
+  richiesta_b2b_collaborazione: '🤝 B2B / Collaborazione',
+  // tecnico
+  problema_checkout: '🔧 Problema checkout',
+  problema_account: '🔧 Problema account',
+  // fallback
+  altro: '💬 Richiesta supporto',
 };
 
 const PRIORITY_BY_URGENCY: Record<string, string> = {
@@ -53,6 +81,7 @@ const PRIORITY_BY_URGENCY: Record<string, string> = {
 
 export interface CreateTicketInput {
   phone: string;
+  category: string;
   reason: string;
   details: string;
   urgency: string;
@@ -81,7 +110,7 @@ export async function createSpokiTicket(env: Env, input: CreateTicketInput): Pro
     title,
     status: 'Open',
     priority,
-    description: input.details,
+    description: `[${input.category.toUpperCase()}] ${input.details}`,
     reference: input.zoeTicketId,
   };
 

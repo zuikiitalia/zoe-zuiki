@@ -107,18 +107,61 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
     input_schema: {
       type: 'object',
       properties: {
+        category: {
+          type: 'string',
+          description: 'Categoria principale del ticket',
+          enum: [
+            'ordine',
+            'spedizione',
+            'reso_rimborso',
+            'prodotto',
+            'pagamento',
+            'reclamo',
+            'richiesta_umano',
+            'amministrativo',
+            'tecnico',
+          ],
+        },
         reason: {
           type: 'string',
-          description: 'Motivo del ticket',
+          description: 'Motivo specifico del ticket — scegli il più preciso',
           enum: [
-            'order_cancel',
-            'order_modify',
-            'wrong_item',
-            'refund_delay',
-            'payment_issue',
-            'legal_complaint',
-            'package_not_delivered',
-            'other',
+            // ordine
+            'ordine_cancellazione',
+            'ordine_modifica_indirizzo',
+            'ordine_modifica_taglia_colore',
+            'ordine_stato_non_aggiornato',
+            // spedizione
+            'spedizione_pacco_non_consegnato',
+            'spedizione_ritardo',
+            'spedizione_tracking_bloccato',
+            'spedizione_indirizzo_errato',
+            // reso_rimborso
+            'rimborso_non_ricevuto',
+            'richiesta_reso',
+            'cambio_taglia_colore',
+            // prodotto
+            'prodotto_articolo_errato',
+            'prodotto_difettoso_danneggiato',
+            'prodotto_disponibilita_futura',
+            // pagamento
+            'pagamento_contestazione_addebito',
+            'pagamento_non_riuscito',
+            'pagamento_codice_sconto',
+            // reclamo
+            'reclamo_legale',
+            'reclamo_esperienza_negativa',
+            'reclamo_social_recensione',
+            // richiesta_umano
+            'cliente_richiede_operatore',
+            // amministrativo
+            'richiesta_fattura',
+            'richiesta_b2b_collaborazione',
+            // tecnico
+            'problema_checkout',
+            'problema_account',
+            // fallback
+            'altro',
           ],
         },
         details: {
@@ -133,7 +176,7 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
             'high solo per: reclami legali, articoli errati, pacchi non consegnati, contestazioni pagamento',
         },
       },
-      required: ['reason', 'details', 'urgency'],
+      required: ['category', 'reason', 'details', 'urgency'],
     },
   },
 ];
