@@ -63,6 +63,22 @@ app.get('/debug/siacloud-discover', async (c) => {
       body: JSON.stringify({ token, barcode, negozio: store }) },
     { name: 'JSON articoli[]+negozi[]', method: 'POST', url, headers: hjson,
       body: JSON.stringify({ token, articoli: [barcode], negozi: [store] }) },
+    // === Stesso token sull'host inventario shopifyzuikiv1.siacloud.com ===
+    // URL REST visto nei network log: /admin/siacloud_get_barcode_availability_in_store/{barcode}/{store}
+    { name: 'INV bearer header', method: 'GET',
+      url: `https://shopifyzuikiv1.siacloud.com/admin/siacloud_get_barcode_availability_in_store/${barcode}/${store}`,
+      headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' } },
+    { name: 'INV token header', method: 'GET',
+      url: `https://shopifyzuikiv1.siacloud.com/admin/siacloud_get_barcode_availability_in_store/${barcode}/${store}`,
+      headers: { 'X-Token': token, 'Accept': 'application/json' } },
+    { name: 'INV apikey header', method: 'GET',
+      url: `https://shopifyzuikiv1.siacloud.com/admin/siacloud_get_barcode_availability_in_store/${barcode}/${store}`,
+      headers: { 'X-Api-Key': token, 'Accept': 'application/json' } },
+    { name: 'INV token query', method: 'GET',
+      url: `https://shopifyzuikiv1.siacloud.com/admin/siacloud_get_barcode_availability_in_store/${barcode}/${store}?token=${encodeURIComponent(token)}` },
+    { name: 'INV bare (no auth)', method: 'GET',
+      url: `https://shopifyzuikiv1.siacloud.com/admin/siacloud_get_barcode_availability_in_store/${barcode}/${store}`,
+      headers: { 'Accept': 'application/json' } },
   ];
 
   const results = [];
