@@ -32,6 +32,8 @@ interface OutboundMessage {
   // Tipo Spoki: "Message" (umano), "Template" / "whatsapp_campaign" (automazione),
   // "Note" (nota interna). Per Zoe: solo "Message" → human_active.
   spokiType: string;
+  // ID del messaggio Spoki: per il match deterministico con i messaggi inviati da Zoe via API.
+  spokiId: string | null;
 }
 
 // Estrae direction normalizzato dal payload Spoki.
@@ -150,7 +152,10 @@ function extractOutbound(payload: unknown): OutboundMessage | null {
   const contentType = String(data.content_type ?? message.type ?? p.type ?? 'Text');
   // type Spoki: distingue "Message" (umano), "Template" (automazione), "Note" (nota), ecc.
   const spokiType = String(data.type ?? message.kind ?? '');
-  return { phone: String(phoneRaw), text, contentType, spokiType };
+  // ID del messaggio Spoki (deterministico per echo detection).
+  const idRaw = data.id ?? data.message_id ?? data.external_id ?? message.id ?? p.id;
+  const spokiId = idRaw !== undefined && idRaw !== null ? String(idRaw) : null;
+  return { phone: String(phoneRaw), text, contentType, spokiType, spokiId };
 }
 
 function normalizePhone(p: string): string {
@@ -185,9 +190,9 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         logger.info('webhook_outbound_ignored', {});
         return;
       }
-      const isEcho = await isOurOutboundEcho(env.ZOE_KV, out.phone, out.text);
+      const isEcho = await isOurOutboundEcho(env.ZOE_KV, out.phone, out.text, out.spokiId);
       if (isEcho) {
-        logger.info('outbound_zoe_echo', { chars: out.text.length, type: out.spokiType }, out.phone);
+        logger.info('outbound_zoe_echo', { chars: out.text.length, type: out.spokiType, spoki_id: out.spokiId ?? 'none' }, out.phone);
         return;
       }
       const t = out.spokiType.toLowerCase();

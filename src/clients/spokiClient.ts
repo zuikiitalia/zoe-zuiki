@@ -33,9 +33,19 @@ export async function sendSpokiMessage(env: Env, phone: string, text: string): P
     logger.error('spoki_send_failed', { status: res.status, body: errorBody.slice(0, 500) }, phone);
     throw new Error(`Spoki send failed: ${res.status}`);
   }
-  // Traccia l'invio per riconoscere l'eco outbound del webhook (non confonderlo con un operatore umano).
-  await recordZoeSent(env.ZOE_KV, phone, text).catch(() => {});
-  logger.info('message_sent', { chars: text.length }, phone);
+  // Parsa la response per recuperare l'ID assegnato da Spoki: lo stesso ID arriverà
+  // nel webhook outbound, permettendo un match deterministico (no race / no timing).
+  let spokiMsgId: string | null = null;
+  try {
+    const data = (await res.clone().json()) as Record<string, unknown>;
+    const inner = (data?.data ?? data) as Record<string, unknown>;
+    const id = inner.id ?? inner.message_id ?? inner.external_id ?? data.id;
+    if (id !== undefined && id !== null) spokiMsgId = String(id);
+  } catch {
+    // Non fatale: cadiamo sul match per hash (già scritto).
+  }
+  await recordZoeSent(env.ZOE_KV, phone, text, spokiMsgId).catch(() => {});
+  logger.info('message_sent', { chars: text.length, spoki_id: spokiMsgId ?? 'none' }, phone);
 }
 
 const TICKET_TITLE_BY_REASON: Record<string, string> = {

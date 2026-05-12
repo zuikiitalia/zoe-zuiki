@@ -89,33 +89,43 @@ export function hashMessageText(text: string): string {
   return quickHash(text.replace(/\s+/g, ' ').trim());
 }
 
-export async function recordZoeSent(kv: KVNamespace, phone: string, text: string): Promise<void> {
+export async function recordZoeSent(
+  kv: KVNamespace,
+  phone: string,
+  text: string,
+  spokiMessageId?: string | null
+): Promise<void> {
   const key = `zoe_sent:${phone}`;
   const raw = await kv.get<ZoeSentEntry[]>(key, 'json');
   const list = Array.isArray(raw) ? raw : [];
   list.push({ hash: hashMessageText(text), ts: Date.now() });
   const trimmed = list.slice(-10);
   await kv.put(key, JSON.stringify(trimmed), { expirationTtl: ZOE_SENT_TTL });
-  // Timestamp separato dell'ultimo invio: fallback quando KV (eventual consistency)
-  // non ha ancora propagato `zoe_sent` al momento del webhook outbound di Spoki.
-  await kv.put(`zoe_last_send:${phone}`, String(Date.now()), { expirationTtl: ZOE_SENT_TTL });
+  // ID deterministico restituito da Spoki sull'invio: il webhook outbound porta
+  // lo stesso ID, quindi il match è certo (non probabilistico né basato sul tempo).
+  if (spokiMessageId) {
+    await kv.put(`zoe_msg_id:${spokiMessageId}`, '1', { expirationTtl: ZOE_SENT_TTL });
+  }
 }
 
-export async function isOurOutboundEcho(kv: KVNamespace, phone: string, text: string): Promise<boolean> {
+export async function isOurOutboundEcho(
+  kv: KVNamespace,
+  phone: string,
+  text: string,
+  spokiMessageId?: string | null
+): Promise<boolean> {
+  // Match deterministico per ID Spoki (se presente nel webhook).
+  if (spokiMessageId) {
+    const found = await kv.get(`zoe_msg_id:${spokiMessageId}`);
+    if (found) return true;
+  }
+  // Fallback per hash testo (utile se l'ID non è disponibile o se il webhook arriva
+  // prima della propagazione KV: l'hash è già scritto comunque).
   const key = `zoe_sent:${phone}`;
   const raw = await kv.get<ZoeSentEntry[]>(key, 'json');
   const list = Array.isArray(raw) ? raw : [];
   const target = hashMessageText(text);
-  if (list.some(e => e.hash === target)) return true;
-  // Fallback temporale: se Zoe ha mandato qualsiasi messaggio a questo numero negli
-  // ultimi 30 secondi, l'outbound è quasi certamente un nostro eco. Un operatore umano
-  // non risponde in <30s; questo evita falsi human_active da KV eventual consistency.
-  const lastSend = await kv.get(`zoe_last_send:${phone}`);
-  if (lastSend) {
-    const lastTs = parseInt(lastSend, 10);
-    if (!isNaN(lastTs) && Date.now() - lastTs < 30_000) return true;
-  }
-  return false;
+  return list.some(e => e.hash === target);
 }
 
 export async function markHumanActive(kv: KVNamespace, phone: string): Promise<void> {
