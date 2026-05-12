@@ -24,7 +24,7 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
     name: 'search_products',
     description:
-      "Cerca prodotti nel catalogo Zuiki. Usalo quando il cliente chiede 'avete X?' o vuole un'info su un articolo. Se il cliente fornisce uno SKU (codice tipo 'Z8401GI', 'B6E211TS'): passalo DIRETTAMENTE come query — il sistema prova automaticamente sku: filter se la ricerca testuale dà 0 risultati. Per ricerche libere: il search è full-text sul TITOLO (es. 'Jeans Push Up', 'Giacca Effetto Pelle'), non sui colori. Strategia: 1) prova categoria + caratteristica chiave, 2) se 0 risultati riprova con solo la categoria. I colori sono varianti, vanno chiesti al cliente sull'articolo trovato.",
+      "Cerca prodotti nel catalogo Zuiki per TITOLO/SKU. Usalo quando il cliente chiede un articolo per nome o SKU. ATTENZIONE: il search è full-text sul TITOLO Shopify (es. 'Jeans Push Up'), NON cerca per colore (i colori sono varianti, non titoli). REGOLE: (1) Se cliente cita uno SKU come 'Z8401GI', 'B6E211TS': passalo direttamente — il sistema usa il filtro sku: in fallback. (2) Per ricerche per COLORE/STILE (es. 't-shirt rossa', 'gonna lunga blu', 'felpa beige'): NON usare search_products con il colore (filtra solo per titolo e dà spesso 0 risultati o risultati irrilevanti). Usa invece find_similar_product passando visual_description='t-shirt rossa' (il sistema fa una ricerca semantica CLIP che capisce il colore visivamente). (3) Per ricerche generiche per categoria ('giacca', 'jeans'): usa pure search_products. (4) Il campo inventory può essere null o 0 senza significare 'esaurito' — è solo che il tracking inventario non è abilitato. Non dichiarare mai 'esaurito' basandoti solo su questo campo.",
     input_schema: {
       type: 'object',
       properties: {
@@ -75,7 +75,12 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
   {
     name: 'find_similar_product',
-    description: `Cerca nel catalogo Zuiki il prodotto visivamente più simile all'immagine inviata dal cliente. Usalo SOLO quando il cliente ha inviato una foto di un capo o accessorio (da social, competitor, o foto personale) e vuole trovare qualcosa di simile da Zuiki. NON usarlo per ricerche testuali: in quel caso usa search_products.
+    description: `Cerca nel catalogo Zuiki il prodotto più simile via ricerca semantica visiva (FashionCLIP). Funziona sia con FOTO inviate dal cliente, sia con DESCRIZIONI TESTUALI quando il cliente specifica colore/stile/dettagli (es. "t-shirt rossa", "gonna lunga blu navy", "felpa beige oversize"). Usalo OBBLIGATORIAMENTE in questi casi:
+- Cliente ha mandato una foto di un capo e chiede "ce l'avete?".
+- Cliente chiede a parole un capo descrivendo il COLORE (es. "t-shirt rossa", "vestito nero") — search_products fallirebbe perché il colore non è nel titolo, mentre CLIP capisce il colore semanticamente.
+- Cliente chiede uno STILE specifico ("oversize", "fluido", "effetto pelle") che potrebbe non essere nel titolo.
+
+NON usarlo per ricerche per nome esplicito di articolo o SKU: in quel caso usa search_products.
 
 COME IDENTIFICARE IL category_suffix dall'immagine:
 Abbigliamento: AB=Abito, AJ=Abito Jeans, BE=Bermuda, BJ=Bermuda Jeans, BO=Body, CA=Camicia, CB=Ciabatta, CD=Cardigan, CJ=Camicia Jeans, CN=Canotta, CP=Cappotto, CS=Casacca, CT=Costume, CV=Coprispalle, FE=Felpa, GB=Giubbino, GI=Giacca, GJ=Giubbino Jeans, GL=Gilet, GN=Gonna Jeans, GO=Gonna, GP=Giacca Ecopelle, GU=Guanti, IN=Infradito, LG=Leggings, MA=Maglia, PA=Pantaloni, PE=Pelliccia, PI=Piumino, PJ=Pantaloni Jeans, PR=Pareo, RE=Reggiseno Costume, RG=Reggiseno, SB=Slip Costume, SC=Sciarpa, SH=Shorts, SJ=Shorts Jeans, SM=Smanicato, SP=Spolverino, SR=Scarpe, TO=Top, TS=T-Shirt, TU=Tuta
@@ -90,7 +95,7 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
         },
         visual_description: {
           type: 'string',
-          description: "Descrizione dettagliata del capo nell'immagine in italiano: tipo di capo, colori, fantasia/trama, stile, dettagli (es. 'camicia maniche lunghe fantasia floreale azzurra su fondo bianco colletto classico chiusura bottoni'). Più è ricca, migliore è la ricerca. OBBLIGATORIA quando il cliente ha mandato un'immagine.",
+          description: "Descrizione dettagliata del capo in italiano: tipo, colori, fantasia/trama, stile, dettagli (es. 'camicia maniche lunghe fantasia floreale azzurra colletto classico'). Per ricerche da foto: descrivi quello che vedi. Per ricerche testuali (cliente che chiede a parole un colore/stile): riformula la richiesta come descrizione visiva ricca (es. cliente dice 't-shirt rossa' → visual_description: 't-shirt rossa manica corta donna'). Più dettagli = migliore match.",
         },
         search_keywords: {
           type: 'string',
