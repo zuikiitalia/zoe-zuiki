@@ -202,26 +202,23 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       }
       const isAutomation = t === 'template' || t === 'whatsapp_campaign' || t === 'campaign';
       if (isAutomation) {
-        // Salviamo l'automazione nella history come messaggio assistant: così quando
-        // la cliente replica, Zoe vede in context "Zuiki ha mandato la notifica X".
         const now = Date.now();
         const prev = await loadConversation(env.ZOE_KV, out.phone);
         const updated: StoredMessage[] = [
           ...prev,
-          { role: 'assistant', content: out.text, ts: now },
+          { role: 'assistant', content: `[Notifica Zuiki]: ${out.text}`, ts: now },
         ];
         await saveConversation(env.ZOE_KV, out.phone, updated);
         logger.info('outbound_automation_saved', { chars: out.text.length, type: out.spokiType }, out.phone);
         return;
       }
-      // Tipo "Message" (manuale) o sconosciuto → assumiamo operatore umano.
-      // Salviamo il messaggio in history (come 'assistant') così quando human_active
-      // scade e Zoe riprende, ha il contesto completo (es. numero d'ordine già comunicato).
+      // Tipo "Message" (manuale) o sconosciuto → operatore umano.
+      // Salviamo il messaggio taggato e settiamo human_active come hint per Zoe.
       const now = Date.now();
       const prev = await loadConversation(env.ZOE_KV, out.phone);
       const updatedHuman: StoredMessage[] = [
         ...prev,
-        { role: 'assistant', content: out.text, ts: now },
+        { role: 'assistant', content: `[Operatore CC]: ${out.text}`, ts: now },
       ];
       await saveConversation(env.ZOE_KV, out.phone, updatedHuman);
       await markHumanActive(env.ZOE_KV, out.phone);
@@ -238,11 +235,12 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
     }
     let { phone, text, images, contentType } = extracted;
 
-    // Se un operatore umano è già attivo su questa chat (ha mandato un outbound
-    // non-Zoe nelle ultime 24h), Zoe NON risponde — il customer care gestisce.
-    if (await isHumanActive(env.ZOE_KV, phone)) {
-      logger.info('skip_human_active', { content_type: contentType }, phone);
-      return;
+    // Se un operatore umano è attivo, NON blocchiamo Claude completamente:
+    // passiamo il flag humanActive così Claude legge la history (con messaggi
+    // taggati [Operatore CC]) e decide autonomamente di fare [NO_REPLY].
+    const humanActive = await isHumanActive(env.ZOE_KV, phone);
+    if (humanActive) {
+      logger.info('human_active_hint_passed', { content_type: contentType }, phone);
     }
 
     // Nota vocale: trascrive con Cloudflare Whisper e tratta come testo normale
@@ -301,7 +299,7 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
 
     let replies: string[];
     try {
-      replies = await processMessage(env, phone, text, history, undefined, images, convId || undefined);
+      replies = await processMessage(env, phone, text, history, undefined, images, convId || undefined, humanActive);
     } catch (err) {
       logger.error(
         'orchestrator_failed',

@@ -588,7 +588,8 @@ export async function processMessage(
   history: StoredMessage[],
   anthropicClient?: Anthropic,
   images: string[] = [],
-  convId?: string
+  convId?: string,
+  humanActive = false
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
@@ -624,6 +625,15 @@ export async function processMessage(
       cache_control: { type: 'ephemeral' },
     },
   ];
+
+  // Se un operatore CC ha già preso in carico la chat, lo comunichiamo esplicitamente
+  // a Claude come secondo blocco di system (non in cache, perché varia per chat).
+  if (humanActive) {
+    systemBlocks.push({
+      type: 'text',
+      text: '⚠️ OPERATORE CC ATTIVO: un agente umano del customer care ha preso in carico questa conversazione. Rispondi SOLO con [NO_REPLY] (e nient\'altro). Non mandare nessun messaggio al cliente.',
+    });
+  }
 
   let iterations = 0;
   let finalText = '';
