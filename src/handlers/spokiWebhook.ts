@@ -241,12 +241,12 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       ];
       await saveConversation(env.ZOE_KV, phone, updated);
 
-      // Scrivi dati analytics in D1 (async, non blocca).
+      // Scrivi dati analytics in D1 (awaited: siamo dentro waitUntil, non blocca il client).
       if (env.ZOE_DB && convId) {
         const userTurns = updated.filter(m => m.role === 'user').length;
         const assistantTurns = updated.filter(m => m.role === 'assistant').length;
 
-        upsertConversation(env.ZOE_DB, {
+        await upsertConversation(env.ZOE_DB, {
           convId,
           phoneHash: pHash,
           firstTs,
@@ -257,13 +257,13 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
           totalOutputTokens: 0,
           totalCacheReadTokens: 0,
           totalCostUsd: 0,
-        }).catch(() => {});
+        }).catch((e) => { logger.error('d1_upsert_failed', { error: String(e) }); });
 
-        // Sentiment analysis async su conversazioni con almeno 4 scambi.
+        // Sentiment analysis su conversazioni con almeno 4 scambi.
         if (updated.length >= 4 && env.ANTHROPIC_API_KEY) {
-          analyzeSentiment(env.ANTHROPIC_API_KEY, updated).then(result => {
-            updateSentiment(env.ZOE_DB!, convId, result.sentiment, result.note).catch(() => {});
-          }).catch(() => {});
+          await analyzeSentiment(env.ANTHROPIC_API_KEY, updated).then(result =>
+            updateSentiment(env.ZOE_DB!, convId, result.sentiment, result.note)
+          ).catch((e) => { logger.error('d1_sentiment_failed', { error: String(e) }); });
         }
       }
     }
