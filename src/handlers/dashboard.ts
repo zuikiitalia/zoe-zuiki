@@ -458,7 +458,7 @@ function renderFindings(data){
     '<td style="font-family:monospace;font-size:12px">'+f.category+'</td>'+
     '<td>'+(f.problem||'').replace(/</g,'&lt;')+'</td>'+
     '<td style="color:#94a3b8">'+(f.suggestion||'').replace(/</g,'&lt;')+'</td>'+
-    '<td><a href="#" onclick="openConv(\''+f.conv_id+'\');return false">apri</a></td>'+
+    '<td><a href="#" onclick="openConv(\\''+f.conv_id+'\\');return false">apri</a></td>'+
     '</tr>').join('')||'<tr><td colspan="6" style="text-align:center;color:#94a3b8">Nessun problema rilevato</td></tr>';
 }
 
