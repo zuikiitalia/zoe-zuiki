@@ -526,13 +526,24 @@ export async function processMessage(
 
   while (iterations <= MAX_TOOL_ITERATIONS) {
     const t0 = Date.now();
-    const response = await anthropic.messages.create({
-      model: CLAUDE_MODEL,
-      max_tokens: CLAUDE_MAX_TOKENS,
-      system: systemBlocks,
-      tools: TOOL_DEFINITIONS,
-      messages,
-    });
+    let response: Anthropic.Message;
+    try {
+      response = await anthropic.messages.create({
+        model: CLAUDE_MODEL,
+        max_tokens: CLAUDE_MAX_TOKENS,
+        system: systemBlocks,
+        tools: TOOL_DEFINITIONS,
+        messages,
+      });
+    } catch (err) {
+      logger.error('claude_api_failed', {
+        iteration: iterations,
+        error: err instanceof Error ? err.message : String(err),
+        message_count: messages.length,
+        last_role: messages[messages.length - 1]?.role,
+      }, phone);
+      throw err;
+    }
     const latency = Date.now() - t0;
     const usage = response.usage;
     logger.info(

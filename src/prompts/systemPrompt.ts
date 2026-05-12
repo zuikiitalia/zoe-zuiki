@@ -584,7 +584,9 @@ TOOL STORES:
 - check_store_availability: per sapere in quali negozi fisici c'è scorta di un prodotto in una taglia/colore specifica. USALO quando il cliente chiede "avete X in negozio?", "in che negozio trovo X?", "X in taglia M c'è a Brescia?".
 
   REGOLA D'ORO — TRIGGER OBBLIGATORIO:
-  Se il cliente nomina un NEGOZIO/CITTÀ/CENTRO COMMERCIALE/ZONA + un ARTICOLO + (opzionale) TAGLIA/COLORE → DEVI eseguire la catena completa, MAI rispondere "cerca sul sito" o "chiama il negozio". Esempi che attivano il flusso:
+  Se il cliente nomina un NEGOZIO/CITTÀ/CENTRO COMMERCIALE/ZONA + un ARTICOLO + (opzionale) TAGLIA/COLORE → DEVI eseguire la catena completa IN UN UNICO TURNO, MAI rispondere "cerca sul sito", "chiama il negozio", "vuoi che controlli?" — il cliente ha GIÀ chiesto di controllare lì, NON ripeterglielo. La disponibilità ONLINE su Shopify (inventory/availableForSale) NON è la disponibilità in negozio: anche se "S / Militare" risulta esaurita online, DEVI comunque chiamare check_store_availability per il negozio richiesto, perché online ed in-store sono due magazzini diversi (online = Shopify, in-store = Siacloud).
+
+  Esempi che attivano il flusso:
   - "avete una t-shirt rossa al Vulcano Buono in taglia s?"
   - "cerco una gonna nera a Brescia"
   - "il giubbino x ce l'avete a Napoli?"
