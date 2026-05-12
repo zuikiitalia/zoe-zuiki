@@ -87,6 +87,37 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
   }
 
   // GET /dashboard/api/conversations?from=&to=&category=&page=
+  // GET /dashboard/api/customers — lista raggruppata per phone_hash
+  // Mostra UN record per cliente con totali aggregati e ID dell'ultima sessione
+  // (utile per aprire il thread completo nel modal).
+  if (path === '/customers') {
+    const category = url.searchParams.get('category');
+    const page = Math.max(0, parseInt(url.searchParams.get('page') ?? '0', 10));
+    const limit = 50;
+    const catFilter = category ? `AND ticket_category = '${category.replace(/'/g, '')}'` : '';
+    const rows = await c.env.ZOE_DB.prepare(`
+      SELECT
+        phone_hash,
+        COUNT(*) AS sessions,
+        SUM(user_turns) AS total_user_turns,
+        SUM(assistant_turns) AS total_assistant_turns,
+        MIN(first_ts) AS first_seen,
+        MAX(last_ts) AS last_seen,
+        SUM(CASE WHEN ticket_id IS NOT NULL THEN 1 ELSE 0 END) AS tickets_count,
+        (SELECT id FROM conversations c2 WHERE c2.phone_hash=conversations.phone_hash ORDER BY c2.last_ts DESC LIMIT 1) AS latest_conv_id,
+        (SELECT sentiment FROM conversations c2 WHERE c2.phone_hash=conversations.phone_hash ORDER BY c2.last_ts DESC LIMIT 1) AS latest_sentiment
+      FROM conversations
+      WHERE first_ts >= ? AND first_ts <= ? ${catFilter}
+      GROUP BY phone_hash
+      ORDER BY last_seen DESC LIMIT ? OFFSET ?
+    `).bind(fromMs, toMs, limit, page * limit).all();
+    const countRow = await c.env.ZOE_DB.prepare(`
+      SELECT COUNT(DISTINCT phone_hash) AS n FROM conversations
+      WHERE first_ts >= ? AND first_ts <= ? ${catFilter}
+    `).bind(fromMs, toMs).first<{ n: number }>();
+    return c.json({ customers: rows.results, total: countRow?.n ?? 0, page, limit });
+  }
+
   if (path === '/conversations') {
     const category = url.searchParams.get('category');
     const page = Math.max(0, parseInt(url.searchParams.get('page') ?? '0', 10));
@@ -125,17 +156,39 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     return c.json({ conversations: rows.results, total: countRow?.n ?? 0, page, limit });
   }
 
-  // GET /dashboard/api/conversation/:id
+  // GET /dashboard/api/conversation/:id — dettaglio conv + intero thread messaggi
   const convMatch = path.match(/^\/conversation\/(.+)$/);
   if (convMatch) {
     const id = convMatch[1]!;
-    const [conv, apiCalls, toolCalls] = await Promise.all([
-      c.env.ZOE_DB.prepare(`SELECT * FROM conversations WHERE id=?`).bind(id).first(),
+    const conv = await c.env.ZOE_DB.prepare(`SELECT * FROM conversations WHERE id=?`).bind(id).first<{
+      id: string; phone_hash: string; first_ts: number; last_ts: number;
+    }>();
+    if (!conv) return c.json({ error: 'not_found' }, 404);
+    const [apiCalls, toolCalls, messages, allConvs, findings] = await Promise.all([
       c.env.ZOE_DB.prepare(`SELECT * FROM api_calls WHERE conv_id=? ORDER BY ts`).bind(id).all(),
       c.env.ZOE_DB.prepare(`SELECT * FROM tool_calls WHERE conv_id=? ORDER BY ts`).bind(id).all(),
+      // INTERO thread con il cliente (no scadenza, tutti i messaggi)
+      c.env.ZOE_DB.prepare(
+        `SELECT role, content, ts FROM messages WHERE phone_hash=? ORDER BY ts ASC`
+      ).bind(conv.phone_hash).all(),
+      // Tutte le conversazioni dello stesso cliente (sessioni)
+      c.env.ZOE_DB.prepare(
+        `SELECT id, first_ts, last_ts, user_turns, assistant_turns, sentiment, ticket_id, ticket_category
+         FROM conversations WHERE phone_hash=? ORDER BY first_ts DESC`
+      ).bind(conv.phone_hash).all(),
+      c.env.ZOE_DB.prepare(
+        `SELECT category, severity, problem, suggestion, analysis_date
+         FROM review_findings WHERE phone_hash=? ORDER BY created_at DESC LIMIT 20`
+      ).bind(conv.phone_hash).all(),
     ]);
-    if (!conv) return c.json({ error: 'not_found' }, 404);
-    return c.json({ conversation: conv, api_calls: apiCalls.results, tool_calls: toolCalls.results });
+    return c.json({
+      conversation: conv,
+      api_calls: apiCalls.results,
+      tool_calls: toolCalls.results,
+      messages: messages.results,
+      sessions: allConvs.results,
+      findings: findings.results,
+    });
   }
 
   // GET /dashboard/api/findings — review giornaliera, ultimi 30 giorni
@@ -239,6 +292,14 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
 .api-row{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #f3f4f6;font-size:.78rem;flex-wrap:wrap}
 .api-row span{background:#f3f4f6;padding:2px 7px;border-radius:5px;color:#374151}
 .tool-pill{display:inline-block;margin:2px;padding:3px 9px;border-radius:9999px;font-size:.75rem;background:#ede9fe;color:#4f46e5;font-weight:600}
+.msg-thread{max-height:50vh;overflow-y:auto;padding:10px;background:#f8fafc;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:12px}
+.msg{margin-bottom:10px;padding:8px 12px;border-radius:8px;max-width:85%;font-size:.85rem}
+.msg-meta{font-size:.7rem;color:#94a3b8;margin-bottom:3px;font-weight:600}
+.msg-text{white-space:pre-wrap;word-break:break-word}
+.msg-user{background:#fff;border:1px solid #e5e7eb;margin-right:auto}
+.msg-zoe{background:#dcfce7;border:1px solid #bbf7d0;margin-left:auto;text-align:left}
+.msg-op{background:#fef3c7;border:1px solid #fde68a;margin-left:auto}
+.msg-auto{background:#dbeafe;border:1px solid #bfdbfe;margin-left:auto}
 .spinner{text-align:center;padding:30px;color:#9ca3af;font-size:.9rem}
 </style>
 </head>
@@ -289,11 +350,11 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
       </table>
     </div>
     <div class="panel" id="conv-panel">
-      <h3>Conversazioni</h3>
+      <h3>Clienti (raggruppati per numero)</h3>
       <div id="conv-spinner" class="spinner">Caricamento…</div>
       <table id="conv-table" style="display:none">
         <thead><tr>
-          <th>Data</th><th>Durata</th><th>Turni</th><th>Ticket</th><th>Categoria</th><th>Sentiment</th><th>Costo</th>
+          <th>Cliente</th><th>Prima/Ultima</th><th>Sessioni</th><th>Turni tot.</th><th>Ticket</th><th>Sentiment ultimo</th>
         </tr></thead>
         <tbody id="conv-tbody"></tbody>
       </table>
@@ -476,7 +537,8 @@ function makeOrUpdateBar(ref,canvasId,labels,datasets){
 async function loadConvs(from,to,cat,page){
   document.getElementById('conv-spinner').style.display='block';
   document.getElementById('conv-table').style.display='none';
-  let url='/conversations?from='+from+'&to='+to+'&page='+page;
+  // Lista raggruppata per cliente (phone_hash).
+  let url='/customers?from='+from+'&to='+to+'&page='+page;
   if(cat) url+='&category='+encodeURIComponent(cat);
   const data=await api(url);
   document.getElementById('conv-spinner').style.display='none';
@@ -484,21 +546,20 @@ async function loadConvs(from,to,cat,page){
 }
 
 function renderConvTable(d){
-  const rows=d.conversations||[];
+  const rows=d.customers||[];
   convTotal=d.total||0;
   const tbody=document.getElementById('conv-tbody');
-  tbody.innerHTML=rows.map(r=>\`<tr class="conv-row" onclick="openConv('\${r.id}')">
-    <td>\${fmt(r.first_ts)}</td>
-    <td>\${dur(r.first_ts,r.last_ts)}</td>
-    <td>\${r.user_turns||0}u / \${r.assistant_turns||0}a</td>
-    <td>\${r.ticket_id?'<span class="badge badge-ticket">'+r.ticket_id+'</span>':'<span class="badge badge-no-ticket">nessuno</span>'}</td>
-    <td>\${r.ticket_category||'—'}</td>
-    <td><span class="badge badge-\${r.sentiment||'unknown'}">\${r.sentiment||'?'}</span></td>
-    <td>—</td>
+  tbody.innerHTML=rows.map(r=>\`<tr class="conv-row" onclick="openConv('\${r.latest_conv_id}')">
+    <td style="font-family:monospace;font-size:12px">\${(r.phone_hash||'').slice(0,12)}…</td>
+    <td>\${fmt(r.first_seen)}<br><span style="color:#94a3b8;font-size:11px">\${fmt(r.last_seen)}</span></td>
+    <td>\${r.sessions||0}</td>
+    <td>\${r.total_user_turns||0}u / \${r.total_assistant_turns||0}a</td>
+    <td>\${r.tickets_count>0?'<span class="badge badge-ticket">'+r.tickets_count+'</span>':'<span class="badge badge-no-ticket">0</span>'}</td>
+    <td><span class="badge badge-\${r.latest_sentiment||'unknown'}">\${r.latest_sentiment||'?'}</span></td>
   </tr>\`).join('');
   document.getElementById('conv-table').style.display='table';
 
-  const info=\`\${d.page*LIMIT+1}–\${Math.min((d.page+1)*LIMIT,convTotal)} di \${convTotal}\`;
+  const info=\`\${d.page*LIMIT+1}–\${Math.min((d.page+1)*LIMIT,convTotal)} di \${convTotal} clienti\`;
   document.getElementById('pager-info').textContent=info;
   document.getElementById('btn-prev').disabled=d.page===0;
   document.getElementById('btn-next').disabled=(d.page+1)*LIMIT>=convTotal;
@@ -531,16 +592,38 @@ async function openConv(id){
   const totalOut=calls.reduce((s,a)=>s+(+a.output_tokens||0),0);
   const totalCache=calls.reduce((s,a)=>s+(+a.cache_read_tokens||0),0);
 
+  const msgs=d.messages||[];
+  const sessions=d.sessions||[];
+  const findings=d.findings||[];
+
+  function classifyMsg(m){
+    if(m.role==='user') return {who:'Cliente',cls:'msg-user',text:m.content};
+    // assistant: distingui via tag in content
+    if(m.content.startsWith('[Operatore CC]:')) return {who:'Operatore CC',cls:'msg-op',text:m.content.replace(/^\\[Operatore CC\\]:\\s*/,'')};
+    if(m.content.startsWith('[Notifica Zuiki]:')) return {who:'Notifica Zuiki',cls:'msg-auto',text:m.content.replace(/^\\[Notifica Zuiki\\]:\\s*/,'')};
+    return {who:'Zoe',cls:'msg-zoe',text:m.content};
+  }
+
   document.getElementById('modal-content').innerHTML=\`
     <dl class="meta-grid">
-      <dt>Periodo</dt><dd>\${fmt(c.first_ts)} → \${fmt(c.last_ts)}</dd>
-      <dt>Turni</dt><dd>\${c.user_turns||0} utente / \${c.assistant_turns||0} assistente</dd>
-      <dt>Sentiment</dt><dd><span class="badge badge-\${c.sentiment||'unknown'}">\${c.sentiment||'?'}</span> \${c.sentiment_note||''}</dd>
+      <dt>Cliente (hash)</dt><dd style="font-family:monospace">\${c.phone_hash}</dd>
+      <dt>Sessione corrente</dt><dd>\${fmt(c.first_ts)} → \${fmt(c.last_ts)}</dd>
+      <dt>Tutte le sessioni</dt><dd>\${sessions.length} con questo cliente</dd>
+      <dt>Sentiment ultimo</dt><dd><span class="badge badge-\${c.sentiment||'unknown'}">\${c.sentiment||'?'}</span> \${c.sentiment_note||''}</dd>
       <dt>Ticket</dt><dd>\${c.ticket_id||'—'} \${c.ticket_category?'('+c.ticket_category+')':''}</dd>
-      <dt>Motivo</dt><dd>\${c.ticket_reason||'—'}</dd>
-      <dt>Urgenza</dt><dd>\${c.ticket_urgency||'—'}</dd>
     </dl>
-    <h3 style="font-size:.82rem;font-weight:700;color:#6b7280;text-transform:uppercase;margin-bottom:8px">Chiamate AI (\${calls.length}) — Tot: \${fmtCost(totalCost)} | In: \${fmtNum(totalIn)} | Out: \${fmtNum(totalOut)} | Cache: \${fmtNum(totalCache)}</h3>
+
+    \${findings.length?\`<h3 style="font-size:.82rem;font-weight:700;color:#ef4444;text-transform:uppercase;margin:12px 0 8px">⚠️ Findings review qualità (\${findings.length})</h3>
+    <div style="margin-bottom:12px">\${findings.map(f=>\`<div style="border-left:3px solid \${f.severity==='high'?'#ef4444':f.severity==='medium'?'#f59e0b':'#94a3b8'};padding:8px 12px;margin-bottom:8px;background:#f8fafc;border-radius:4px">
+      <div style="font-size:11px;color:#64748b">\${f.analysis_date} · \${f.category} · \${f.severity}</div>
+      <div style="margin:4px 0"><strong>Problema:</strong> \${(f.problem||'').replace(/</g,'&lt;')}</div>
+      <div style="color:#475569"><strong>Suggerimento:</strong> \${(f.suggestion||'').replace(/</g,'&lt;')}</div>
+    </div>\`).join('')}</div>\`:''}
+
+    <h3 style="font-size:.82rem;font-weight:700;color:#6b7280;text-transform:uppercase;margin:12px 0 8px">Thread completo (\${msgs.length} messaggi)</h3>
+    <div class="msg-thread">\${msgs.map(m=>{const k=classifyMsg(m);return \`<div class="msg \${k.cls}"><div class="msg-meta">\${k.who} · \${fmt(m.ts)}</div><div class="msg-text">\${(k.text||'').replace(/</g,'&lt;').replace(/\\n/g,'<br>')}</div></div>\`;}).join('')||'<p style="color:#94a3b8">Nessun messaggio in D1 per questo cliente</p>'}</div>
+
+    <h3 style="font-size:.82rem;font-weight:700;color:#6b7280;text-transform:uppercase;margin:16px 0 8px">Chiamate AI sessione corrente (\${calls.length}) — Tot: \${fmtCost(totalCost)} | In: \${fmtNum(totalIn)} | Out: \${fmtNum(totalOut)} | Cache: \${fmtNum(totalCache)}</h3>
     \${calls.map(a=>\`<div class="api-row">
       <span>#\${a.iteration}</span>
       <span>\${a.model?.replace('claude-','')?.slice(0,14)}</span>
