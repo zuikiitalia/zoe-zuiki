@@ -210,6 +210,15 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         return;
       }
       // Tipo "Message" (manuale) o sconosciuto → assumiamo operatore umano.
+      // Salviamo il messaggio in history (come 'assistant') così quando human_active
+      // scade e Zoe riprende, ha il contesto completo (es. numero d'ordine già comunicato).
+      const now = Date.now();
+      const prev = await loadConversation(env.ZOE_KV, out.phone);
+      const updatedHuman: StoredMessage[] = [
+        ...prev,
+        { role: 'assistant', content: out.text, ts: now },
+      ];
+      await saveConversation(env.ZOE_KV, out.phone, updatedHuman);
       await markHumanActive(env.ZOE_KV, out.phone);
       logger.info('human_operator_detected', { chars: out.text.length, type: out.spokiType }, out.phone);
       return;
