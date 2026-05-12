@@ -138,6 +138,37 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     return c.json({ conversation: conv, api_calls: apiCalls.results, tool_calls: toolCalls.results });
   }
 
+  // GET /dashboard/api/findings — review giornaliera, ultimi 30 giorni
+  if (path === '/findings') {
+    const [findings, summary] = await Promise.all([
+      c.env.ZOE_DB.prepare(`
+        SELECT id, conv_id, analysis_date, category, severity, problem, suggestion, conv_excerpt
+        FROM review_findings
+        WHERE analysis_date >= date('now', '-30 days')
+        ORDER BY analysis_date DESC,
+          CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+          created_at DESC
+        LIMIT 500
+      `).all(),
+      c.env.ZOE_DB.prepare(`
+        SELECT category, severity, COUNT(*) AS n
+        FROM review_findings
+        WHERE analysis_date >= date('now', '-30 days')
+        GROUP BY category, severity
+        ORDER BY n DESC
+      `).all(),
+    ]);
+    return c.json({ findings: findings.results, summary: summary.results });
+  }
+
+  // POST /dashboard/api/run-review — trigger manuale (utile per test)
+  if (path === '/run-review') {
+    if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: 'no_anthropic_key' }, 503);
+    const { runDailyReview } = await import('../analytics/dailyReview');
+    const result = await runDailyReview(c.env.ZOE_DB, c.env.ANTHROPIC_API_KEY);
+    return c.json(result);
+  }
+
   return c.json({ error: 'not_found' }, 404);
 }
 
@@ -247,6 +278,16 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
       <div class="panel"><h3>Token per modello</h3><div class="chart-wrap"><canvas id="ch-tokens"></canvas></div></div>
       <div class="panel"><h3>Tool più usati</h3><div class="chart-wrap"><canvas id="ch-tools"></canvas></div></div>
     </div>
+    <div class="panel" id="findings-panel">
+      <h3>🔎 Review qualità (ultimi 30 giorni) <button id="run-review-btn" onclick="runReview()" style="float:right;font-size:12px">Esegui ora</button></h3>
+      <div id="findings-summary" style="margin-bottom:12px"></div>
+      <table id="findings-table">
+        <thead><tr>
+          <th>Data</th><th>Severità</th><th>Categoria</th><th>Problema</th><th>Suggerimento</th><th>Conv</th>
+        </tr></thead>
+        <tbody id="findings-tbody"></tbody>
+      </table>
+    </div>
     <div class="panel" id="conv-panel">
       <h3>Conversazioni</h3>
       <div id="conv-spinner" class="spinner">Caricamento…</div>
@@ -286,8 +327,8 @@ function fmtNum(n){ return n!=null ? Number(n).toLocaleString('it-IT') : '0'; }
 function fmtCost(n){ return n!=null ? '$'+Number(n).toFixed(4) : '$0.0000'; }
 function dur(a,b){ const m=Math.round((b-a)/60000); if(m<1)return '<1 min'; if(m<60)return m+' min'; return Math.round(m/60)+'h '+m%60+'m'; }
 
-async function api(path){
-  const r=await fetch('/dashboard/api'+path,{headers:{Authorization:'Bearer '+SECRET}});
+async function api(path,opts){
+  const r=await fetch('/dashboard/api'+path,Object.assign({headers:{Authorization:'Bearer '+SECRET}},opts||{}));
   if(r.status===401){logout();return null;}
   return r.json();
 }
@@ -319,12 +360,56 @@ function getFilters(){
 async function reload(){
   const {from,to,cat}=getFilters();
   convPage=0;
-  const [summary,convs]=await Promise.all([
+  const [summary,convs,findings]=await Promise.all([
     api('/summary?from='+from+'&to='+to),
-    loadConvs(from,to,cat,0)
+    loadConvs(from,to,cat,0),
+    api('/findings')
   ]);
   if(summary) renderSummary(summary);
   if(convs) renderConvTable(convs);
+  if(findings) renderFindings(findings);
+}
+
+function sevBadge(s){
+  const colors={high:'#ef4444',medium:'#f59e0b',low:'#94a3b8'};
+  const labels={high:'ALTA',medium:'MEDIA',low:'BASSA'};
+  return '<span style="background:'+(colors[s]||'#94a3b8')+';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">'+(labels[s]||s)+'</span>';
+}
+
+function renderFindings(data){
+  const summary=data.summary||[];
+  const sumEl=document.getElementById('findings-summary');
+  const totals={high:0,medium:0,low:0,total:0};
+  const byCat={};
+  summary.forEach(r=>{
+    totals[r.severity]=(totals[r.severity]||0)+r.n;
+    totals.total+=r.n;
+    byCat[r.category]=(byCat[r.category]||0)+r.n;
+  });
+  const catList=Object.entries(byCat).sort((a,b)=>b[1]-a[1]).map(([k,v])=>'<span style="background:#1e293b;padding:3px 8px;border-radius:4px;margin-right:6px;font-size:12px">'+k+': '+v+'</span>').join('');
+  sumEl.innerHTML='<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap"><div><strong>'+totals.total+'</strong> problemi (<span style="color:#ef4444">'+totals.high+' alta</span>, <span style="color:#f59e0b">'+totals.medium+' media</span>, <span style="color:#94a3b8">'+totals.low+' bassa</span>)</div><div>'+catList+'</div></div>';
+
+  const findings=data.findings||[];
+  const tbody=document.getElementById('findings-tbody');
+  tbody.innerHTML=findings.map(f=>'<tr>'+
+    '<td>'+f.analysis_date+'</td>'+
+    '<td>'+sevBadge(f.severity)+'</td>'+
+    '<td style="font-family:monospace;font-size:12px">'+f.category+'</td>'+
+    '<td>'+(f.problem||'').replace(/</g,'&lt;')+'</td>'+
+    '<td style="color:#94a3b8">'+(f.suggestion||'').replace(/</g,'&lt;')+'</td>'+
+    '<td><a href="#" onclick="openConv(\''+f.conv_id+'\');return false">apri</a></td>'+
+    '</tr>').join('')||'<tr><td colspan="6" style="text-align:center;color:#94a3b8">Nessun problema rilevato</td></tr>';
+}
+
+async function runReview(){
+  const btn=document.getElementById('run-review-btn');
+  btn.disabled=true;btn.textContent='Esecuzione…';
+  try{
+    const r=await api('/run-review',{method:'POST'});
+    if(r) alert('Review completata: '+r.analyzed+' conversazioni analizzate, '+r.findings+' problemi trovati');
+    await reload();
+  }catch(e){alert('Errore: '+e.message);}
+  btn.disabled=false;btn.textContent='Esegui ora';
 }
 
 function renderSummary(d){

@@ -4,6 +4,7 @@ import { handleSpokiWebhook } from './handlers/spokiWebhook';
 import { handleShopifyInstall } from './handlers/shopifyInstall';
 import { handleShopifyCallback } from './handlers/shopifyCallback';
 import { handleDashboardHTML, handleDashboardAPI } from './handlers/dashboard';
+import { runDailyReview } from './analytics/dailyReview';
 import { logger } from './utils/logger';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -14,6 +15,7 @@ app.get('/shopify/install', handleShopifyInstall);
 app.get('/shopify/callback', handleShopifyCallback);
 app.get('/dashboard', handleDashboardHTML);
 app.get('/dashboard/api/*', handleDashboardAPI);
+app.post('/dashboard/api/*', handleDashboardAPI);
 
 app.notFound((c) => c.json({ error: 'not_found' }, 404));
 
@@ -25,8 +27,27 @@ app.onError((err, c) => {
   return c.json({ error: 'internal_error' }, 500);
 });
 
-// Cron job ogni 30 min: pinga lo HF Space FashionCLIP per evitare cold start.
-async function scheduled(env: Env): Promise<void> {
+// Cron jobs:
+// - "*/30 * * * *" (ogni 30 min): keep-alive HF Space FashionCLIP
+// - "0 22 * * *" (giornaliero alle 22:00 UTC): review qualità conversazioni
+async function scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+  if (event.cron === '0 22 * * *') {
+    if (!env.ZOE_DB || !env.ANTHROPIC_API_KEY) {
+      logger.warn('daily_review_skipped', { reason: 'missing_bindings' });
+      return;
+    }
+    try {
+      const result = await runDailyReview(env.ZOE_DB, env.ANTHROPIC_API_KEY);
+      logger.info('daily_review_ok', result);
+    } catch (err) {
+      logger.error('daily_review_failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return;
+  }
+
+  // Default: keep-alive HF Space.
   if (!env.HF_SPACE_URL) return;
   try {
     await fetch(`${env.HF_SPACE_URL}/embed`, {
@@ -43,6 +64,6 @@ async function scheduled(env: Env): Promise<void> {
 
 // Esporta sia fetch+scheduled (Cloudflare Workers) sia request (test Hono).
 export default Object.assign(
-  { fetch: app.fetch, scheduled: (_event: ScheduledEvent, env: Env) => scheduled(env) },
+  { fetch: app.fetch, scheduled: (event: ScheduledEvent, env: Env) => scheduled(event, env) },
   { request: app.request.bind(app) }
 );

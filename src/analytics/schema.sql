@@ -56,6 +56,22 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_phone_hash_ts ON messages(phone_hash, ts);
+
+CREATE TABLE IF NOT EXISTS review_findings (
+  id TEXT PRIMARY KEY,
+  conv_id TEXT NOT NULL,
+  phone_hash TEXT NOT NULL,
+  analysis_date TEXT NOT NULL,            -- YYYY-MM-DD (data della conversazione analizzata)
+  category TEXT NOT NULL,                 -- missed_ticket | wrong_refusal | ambiguous_language | missed_context | silent_stop | false_promise | repetitive | meta_excuse | other
+  severity TEXT NOT NULL,                 -- low | medium | high
+  problem TEXT NOT NULL,
+  suggestion TEXT NOT NULL,
+  conv_excerpt TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_findings_date ON review_findings(analysis_date);
+CREATE INDEX IF NOT EXISTS idx_review_findings_category ON review_findings(category);
+CREATE INDEX IF NOT EXISTS idx_review_findings_severity ON review_findings(severity);
 CREATE INDEX IF NOT EXISTS idx_conversations_first_ts ON conversations(first_ts);
 CREATE INDEX IF NOT EXISTS idx_conversations_phone_hash ON conversations(phone_hash);
 CREATE INDEX IF NOT EXISTS idx_conversations_ticket_category ON conversations(ticket_category);
