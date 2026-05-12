@@ -118,7 +118,7 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
         },
         store_name: {
           type: 'string',
-          description: "Nome (o pezzo del nome) del negozio specifico richiesto dal cliente, es. 'Vulcano Buono', 'Le Porte Franche', 'Campania', 'Jambo1'. USA QUESTO quando il cliente nomina UN negozio preciso — match per substring sul nome del negozio. Non usarlo se il cliente cita solo una citta'/regione: in quel caso usa province/region.",
+          description: "Nome (anche parziale o approssimativo) del negozio richiesto dal cliente. Il sistema fa fuzzy match sui 146 negozi Zuiki Siacloud: tollera typo (es. 'Franciacorte' → 'Franciacorta Outlet Village'), nomi parziali (es. 'Borromea' → 'Galleria Borromea Shopping Center'), e abbreviazioni. Passa quello che ha scritto il cliente, tale e quale. RISPOSTE POSSIBILI: (a) match unico → resolved_store contiene il negozio canonico e stores_with_stock dice se ha scorta; (b) ambiguo → la risposta contiene ambiguous_store_name:true e candidates: lista di negozi da far scegliere al cliente; (c) typo grosso non riconosciuto → error: 'store_name_not_recognized'.",
         },
         region: {
           type: 'string',

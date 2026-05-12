@@ -15,6 +15,7 @@ import {
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
 import { checkBarcodeAvailability } from '../clients/siacloudClient';
+import { SIACLOUD_STORES } from '../data/siacloudStoreCodes';
 import {
   computeImageEmbeddingFashionCLIP,
   computeTextEmbeddingFashionCLIP,
@@ -113,6 +114,51 @@ async function searchStores(input: Record<string, unknown>): Promise<Record<stri
   };
 }
 
+// Normalizza un nome negozio per fuzzy match: lowercase, rimuove accenti,
+// abbreviazioni "C.C.", "S.C.", "C/C", punteggiatura, spazi multipli.
+function normalizeStoreName(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\bc[.\s/]?c\.?\b/g, '')   // "C.C.", "C/C", "C C"
+    .replace(/\bs[.\s]?c\.?\b/g, '')    // "S.C."
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Score di similarità tra query del cliente e nome negozio.
+// Restituisce 0..1 (1 = match esatto/perfetto).
+function storeNameScore(query: string, storeName: string): number {
+  const q = normalizeStoreName(query);
+  const n = normalizeStoreName(storeName);
+  if (!q || !n) return 0;
+  if (n.includes(q)) return 1;            // query è dentro il nome (esatto)
+  if (q.includes(n)) return 0.9;          // nome è dentro la query (cliente più generico)
+  // Match per token: ogni parola della query deve avere un prefisso significativo in qualche parola del nome.
+  const qTokens = q.split(' ').filter(t => t.length >= 4);
+  const nTokens = n.split(' ');
+  if (qTokens.length === 0) return 0;
+  let matched = 0;
+  for (const qt of qTokens) {
+    const prefix = qt.slice(0, Math.max(4, qt.length - 2)); // tollera ultimo 1-2 char (typo)
+    if (nTokens.some(nt => nt.startsWith(prefix) || qt.startsWith(nt.slice(0, prefix.length)))) {
+      matched++;
+    }
+  }
+  return matched / qTokens.length * 0.85; // max 0.85 per match parziale
+}
+
+// Trova i negozi che plausibilmente corrispondono alla query del cliente.
+// Restituisce top match con score >= 0.6.
+function findStoreCandidates(query: string, maxResults = 5): Array<{ code: string; name: string; region: string; province: string; score: number }> {
+  return SIACLOUD_STORES
+    .map(s => ({ ...s, score: storeNameScore(query, s.name) }))
+    .filter(s => s.score >= 0.6)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxResults);
+}
+
 async function executeTool(
   env: Env,
   phone: string,
@@ -147,21 +193,59 @@ async function executeTool(
         if (!barcode) return JSON.stringify({ error: 'missing_barcode' });
         const regionFilter = (input.region as string | undefined)?.toLowerCase().trim();
         const provinceFilter = (input.province as string | undefined)?.toLowerCase().trim();
-        const nameQuery = (input.store_name as string | undefined)?.toLowerCase().trim();
+        const nameQueryRaw = (input.store_name as string | undefined)?.trim();
         const maxResults = Math.max(1, Math.min(50, Number(input.max_results) || 15));
+
+        // Fuzzy match del nome negozio: l'utente può scrivere "Franciacorte" ma il
+        // negozio si chiama "Franciacorta Outlet Village". Calcoliamo i candidati
+        // sulla mappa completa dei 146 negozi Siacloud.
+        let resolvedCodes: Set<string> | null = null;
+        let candidates: Array<{ code: string; name: string; region: string; province: string; score: number }> = [];
+        let ambiguous = false;
+        if (nameQueryRaw) {
+          candidates = findStoreCandidates(nameQueryRaw, 5);
+          if (candidates.length === 0) {
+            // Nessun match plausibile: probabile typo grosso. Restituiamo errore di match.
+            logger.info('store_name_no_match', { query: nameQueryRaw }, phone);
+            return JSON.stringify({
+              error: 'store_name_not_recognized',
+              query: nameQueryRaw,
+              message: `Non riconosco nessun negozio Zuiki con un nome simile a "${nameQueryRaw}". Chiedi al cliente di precisare città o nome più completo.`,
+            });
+          }
+          // Esattamente 1 candidato OR il top è molto più forte del secondo → usa quello.
+          const top = candidates[0]!;
+          const second = candidates[1];
+          if (!second || (top.score - second.score) >= 0.2 || top.score >= 0.95) {
+            resolvedCodes = new Set([top.code]);
+          } else {
+            // Ambiguo: 2+ candidati con score simile. Restituisci la lista per chiedere conferma.
+            ambiguous = true;
+          }
+        }
+
+        if (ambiguous) {
+          logger.info('store_name_ambiguous', { query: nameQueryRaw, candidates: candidates.map(c => c.name) }, phone);
+          return JSON.stringify({
+            ambiguous_store_name: true,
+            query: nameQueryRaw,
+            candidates: candidates.map(c => ({ name: c.name, city_or_province: c.province, region: c.region })),
+            message: `Ho trovato più negozi che potrebbero corrispondere a "${nameQueryRaw}". Chiedi al cliente di precisare quale.`,
+          });
+        }
 
         const avail = await checkBarcodeAvailability(barcode);
         let filtered = avail.stores;
         if (regionFilter) filtered = filtered.filter((s) => s.region.toLowerCase().includes(regionFilter));
         if (provinceFilter) filtered = filtered.filter((s) => s.province.toLowerCase().includes(provinceFilter));
-        if (nameQuery) filtered = filtered.filter((s) => s.name.toLowerCase().includes(nameQuery));
+        if (resolvedCodes) filtered = filtered.filter((s) => resolvedCodes!.has(s.code));
 
-        const requestedStoreFound = nameQuery ? filtered.length > 0 : null;
+        const requestedStoreFound = resolvedCodes ? filtered.length > 0 : null;
+        const resolvedStoreInfo = resolvedCodes ? candidates[0] : null;
 
-        // Se store_name è stato passato e non c'è match, fornisci ALTERNATIVE
-        // (top negozi nazionali per quantità) così Zoe può proporle al cliente.
+        // Se il negozio richiesto non ha scorta, dai 5 alternative top nazionali.
         let alternatives: typeof avail.stores = [];
-        if (nameQuery && filtered.length === 0) {
+        if (resolvedCodes && filtered.length === 0) {
           alternatives = avail.stores.slice(0, 5);
         }
 
@@ -169,7 +253,8 @@ async function executeTool(
         const stores = filtered.slice(0, maxResults);
         logger.info('check_store_availability', {
           barcode, total: avail.total, returned: stores.length,
-          region: regionFilter, province: provinceFilter, store_name: nameQuery,
+          region: regionFilter, province: provinceFilter,
+          store_name_query: nameQueryRaw, resolved_store: resolvedStoreInfo?.name,
           requested_store_found: requestedStoreFound,
           alternatives_count: alternatives.length,
         }, phone);
@@ -177,6 +262,9 @@ async function executeTool(
           found: avail.found,
           barcode,
           total_units_nationwide: avail.total,
+          resolved_store: resolvedStoreInfo
+            ? { name: resolvedStoreInfo.name, province: resolvedStoreInfo.province, region: resolvedStoreInfo.region }
+            : undefined,
           stores_with_stock: stores,
           truncated,
           requested_store_found: requestedStoreFound,

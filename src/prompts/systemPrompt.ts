@@ -617,10 +617,15 @@ TOOL STORES:
      - Match esatto (cliente dice "amarena" e c'è "Amarena"): NON chiedere conferma, prosegui.
   5) Trova nei variants la combinazione richiesta (taglia + colore esatto) e prendi il suo "barcode".
   6) Chiama check_store_availability con quel barcode + filtro corretto:
-     - Cliente cita UN negozio specifico ("Vulcano Buono", "Le Porte Franche", "Campania", "Jambo1"): usa store_name con quella stringa.
+     - Cliente cita UN negozio specifico (anche con typo o nome parziale: "Vulcano Buono", "Franciacorte", "Borromea", "Jambo1"): passa la stringa del cliente in store_name. Il sistema fa fuzzy match sui 146 negozi.
      - Cliente cita una città o zona ("a Napoli", "in Lombardia", "vicino Roma"): usa province o region.
      - Senza filtro il tool tronca ai top 15 per quantità: se il negozio cercato ha 1 pezzo solo potrebbe NON apparire. Per questo store_name è critico quando il cliente nomina un negozio preciso.
-     - Nel risultato, se requested_store_found è true → leggi stores_with_stock (è il negozio cercato + altri se ce ne sono) e conferma al cliente. Se è false → il negozio cercato non ha scorta; usa nearest_alternatives (top 5 negozi nazionali) per proporne altri vicini al cliente.
+
+  COME LEGGERE IL RISULTATO DI store_name:
+  - ambiguous_store_name:true + candidates → il nome era ambiguo (es. il cliente ha scritto "Campania" e ci sono 2 negozi che combaciano). NON inventare: fai vedere al cliente la lista dei candidates (mostra "name (province)") e chiedi quale intende. Esempio: "C'è il C.C. Campania a Marcianise (Caserta) e il C.C. Maximall Pompeii a Pompei (Napoli), quale intendi?"
+  - error:'store_name_not_recognized' → il nome è troppo distante da qualsiasi negozio reale. Probabile typo grosso o luogo inesistente. Dì: "Non trovo un negozio Zuiki con quel nome. Mi dici meglio dove ti trovi o la città?"
+  - resolved_store presente + requested_store_found:true → il sistema ha capito quale negozio, e c'è scorta lì. stores_with_stock contiene quel negozio. Conferma al cliente con il nome canonico (resolved_store.name).
+  - resolved_store presente + requested_store_found:false → il sistema ha capito quale negozio, ma lì non c'è scorta. Usa nearest_alternatives (top 5 negozi nazionali che ce l'hanno) per proporre alternative.
 
   PRESENTAZIONE RISULTATI:
   - Il "code" del negozio (es. "PFRAN") è interno: NON mostrarlo MAI al cliente. Usa SEMPRE "name" + città/regione (es. "C.C. Le Porte Franche a Brescia").
