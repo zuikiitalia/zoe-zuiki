@@ -1,5 +1,6 @@
 import type { Env } from '../config';
 import { logger } from '../utils/logger';
+import { recordZoeSent } from '../storage/kvStore';
 
 // Endpoint verificati dalla doc Postman ufficiale Spoki (2026-04-24).
 const SPOKI_SEND_URL = 'https://api.spoki.com/api/1/messages/send/';
@@ -32,6 +33,8 @@ export async function sendSpokiMessage(env: Env, phone: string, text: string): P
     logger.error('spoki_send_failed', { status: res.status, body: errorBody.slice(0, 500) }, phone);
     throw new Error(`Spoki send failed: ${res.status}`);
   }
+  // Traccia l'invio per riconoscere l'eco outbound del webhook (non confonderlo con un operatore umano).
+  await recordZoeSent(env.ZOE_KV, phone, text).catch(() => {});
   logger.info('message_sent', { chars: text.length }, phone);
 }
 

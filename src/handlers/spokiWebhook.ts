@@ -7,6 +7,9 @@ import {
   loadConversation,
   saveConversation,
   checkAndIncrementRateLimit,
+  isHumanActive,
+  markHumanActive,
+  isOurOutboundEcho,
   type StoredMessage,
 } from '../storage/kvStore';
 import { processMessage } from '../orchestrator/claudeOrchestrator';
@@ -20,6 +23,30 @@ interface InboundMessage {
   text: string;
   images: string[];
   contentType: string;
+}
+
+interface OutboundMessage {
+  phone: string;     // numero del CLIENTE (to_phone in outbound)
+  text: string;
+  contentType: string;
+}
+
+// Estrae direction normalizzato dal payload Spoki.
+function getDirection(payload: unknown): 'inbound' | 'outbound' | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  const data = (p.data ?? {}) as Record<string, unknown>;
+  const event = p.event as string | undefined;
+  const direction = data.direction as string | undefined;
+  if (direction) {
+    if (/^outbound$/i.test(direction)) return 'outbound';
+    if (/^inbound$/i.test(direction)) return 'inbound';
+  }
+  if (event) {
+    if (/outbound|outgoing|sent/i.test(event)) return 'outbound';
+    if (/inbound|incoming|received/i.test(event)) return 'inbound';
+  }
+  return null;
 }
 
 // Formato webhook Spoki v2 (verificato live 2026-04-24):
@@ -50,8 +77,8 @@ function extractInbound(
   const textRaw = (data.text ?? message.text ?? p.text ?? p.body ?? message.body ?? '') as string;
   const text = typeof textRaw === 'string' ? textRaw : '';
 
-  const direction = data.direction as string | undefined;
-  if (direction && !/^inbound$/i.test(direction)) return null;
+  const direction = getDirection(payload);
+  if (direction === 'outbound') return null;
 
   const contentType = String(data.content_type ?? message.type ?? p.type ?? 'Text');
 
@@ -95,6 +122,32 @@ function extractInbound(
   return { phone, text, images, contentType };
 }
 
+// Estrae un messaggio outbound (Zuiki → cliente). Il "phone" che ci interessa
+// è quello del CLIENTE — to_phone in outbound. Serve per riconoscere se è un
+// eco di un nostro send (Zoe) o un messaggio mandato da un operatore umano.
+function extractOutbound(payload: unknown): OutboundMessage | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  if (getDirection(payload) !== 'outbound') return null;
+
+  const data = (p.data ?? {}) as Record<string, unknown>;
+  const message = (p.message ?? {}) as Record<string, unknown>;
+
+  const phoneRaw =
+    data.to_phone ??
+    (data.contact as Record<string, unknown> | undefined)?.phone ??
+    p.to ??
+    p.phone;
+  if (!phoneRaw) return null;
+
+  const textRaw = (data.text ?? message.text ?? p.text ?? p.body ?? '') as string;
+  const text = typeof textRaw === 'string' ? textRaw.trim() : '';
+  if (!text) return null;
+
+  const contentType = String(data.content_type ?? message.type ?? p.type ?? 'Text');
+  return { phone: String(phoneRaw), text, contentType };
+}
+
 function normalizePhone(p: string): string {
   return p.replace(/\D/g, '');
 }
@@ -113,6 +166,26 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
   try {
     logger.info('webhook_payload_raw', { payload: payload as Record<string, unknown> });
 
+    // OUTBOUND: messaggio mandato da Zuiki → cliente. Distinguere se è eco di Zoe
+    // o messaggio da operatore umano. Se umano → flag human_active per 24h.
+    const direction = getDirection(payload);
+    if (direction === 'outbound') {
+      const out = extractOutbound(payload);
+      if (!out) {
+        logger.info('webhook_outbound_ignored', {});
+        return;
+      }
+      const isEcho = await isOurOutboundEcho(env.ZOE_KV, out.phone, out.text);
+      if (isEcho) {
+        logger.info('outbound_zoe_echo', { chars: out.text.length }, out.phone);
+        return;
+      }
+      // Operatore umano sta scrivendo → Zoe non risponde più per 24h.
+      await markHumanActive(env.ZOE_KV, out.phone);
+      logger.info('human_operator_detected', { chars: out.text.length }, out.phone);
+      return;
+    }
+
     const extracted = extractInbound(payload, env.WHATSAPP_NUMBER);
     if (!extracted) {
       logger.info('webhook_ignored', {
@@ -121,6 +194,13 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       return;
     }
     let { phone, text, images, contentType } = extracted;
+
+    // Se un operatore umano è già attivo su questa chat (ha mandato un outbound
+    // non-Zoe nelle ultime 24h), Zoe NON risponde — il customer care gestisce.
+    if (await isHumanActive(env.ZOE_KV, phone)) {
+      logger.info('skip_human_active', { content_type: contentType }, phone);
+      return;
+    }
 
     // Nota vocale: trascrive con Cloudflare Whisper e tratta come testo normale
     if ((/^(audio|voice)$/i.test(contentType) || /^audio\//i.test(contentType)) && env.AI) {
