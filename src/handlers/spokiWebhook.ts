@@ -29,6 +29,9 @@ interface OutboundMessage {
   phone: string;     // numero del CLIENTE (to_phone in outbound)
   text: string;
   contentType: string;
+  // Tipo Spoki: "Message" (umano), "Template" / "whatsapp_campaign" (automazione),
+  // "Note" (nota interna). Per Zoe: solo "Message" → human_active.
+  spokiType: string;
 }
 
 // Estrae direction normalizzato dal payload Spoki.
@@ -145,7 +148,9 @@ function extractOutbound(payload: unknown): OutboundMessage | null {
   if (!text) return null;
 
   const contentType = String(data.content_type ?? message.type ?? p.type ?? 'Text');
-  return { phone: String(phoneRaw), text, contentType };
+  // type Spoki: distingue "Message" (umano), "Template" (automazione), "Note" (nota), ecc.
+  const spokiType = String(data.type ?? message.kind ?? '');
+  return { phone: String(phoneRaw), text, contentType, spokiType };
 }
 
 function normalizePhone(p: string): string {
@@ -166,8 +171,13 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
   try {
     logger.info('webhook_payload_raw', { payload: payload as Record<string, unknown> });
 
-    // OUTBOUND: messaggio mandato da Zuiki → cliente. Distinguere se è eco di Zoe
-    // o messaggio da operatore umano. Se umano → flag human_active per 24h.
+    // OUTBOUND: messaggio mandato da Zuiki → cliente.
+    // Distinguiamo tramite il campo Spoki "type":
+    //   - "Message" → operatore umano risponde a mano → human_active 24h, Zoe tace
+    //   - "Template" / "whatsapp_campaign" → automazione (es. "ordine spedito") →
+    //     NON è umano, ma salviamo in history così Zoe ha contesto quando la cliente replica
+    //   - "Note" → nota interna Spoki, non visibile al cliente → ignora
+    //   - Echo di un nostro send (Zoe) → ignora
     const direction = getDirection(payload);
     if (direction === 'outbound') {
       const out = extractOutbound(payload);
@@ -177,12 +187,31 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       }
       const isEcho = await isOurOutboundEcho(env.ZOE_KV, out.phone, out.text);
       if (isEcho) {
-        logger.info('outbound_zoe_echo', { chars: out.text.length }, out.phone);
+        logger.info('outbound_zoe_echo', { chars: out.text.length, type: out.spokiType }, out.phone);
         return;
       }
-      // Operatore umano sta scrivendo → Zoe non risponde più per 24h.
+      const t = out.spokiType.toLowerCase();
+      if (t === 'note') {
+        logger.info('outbound_note_ignored', {}, out.phone);
+        return;
+      }
+      const isAutomation = t === 'template' || t === 'whatsapp_campaign' || t === 'campaign';
+      if (isAutomation) {
+        // Salviamo l'automazione nella history come messaggio assistant: così quando
+        // la cliente replica, Zoe vede in context "Zuiki ha mandato la notifica X".
+        const now = Date.now();
+        const prev = await loadConversation(env.ZOE_KV, out.phone);
+        const updated: StoredMessage[] = [
+          ...prev,
+          { role: 'assistant', content: out.text, ts: now },
+        ];
+        await saveConversation(env.ZOE_KV, out.phone, updated);
+        logger.info('outbound_automation_saved', { chars: out.text.length, type: out.spokiType }, out.phone);
+        return;
+      }
+      // Tipo "Message" (manuale) o sconosciuto → assumiamo operatore umano.
       await markHumanActive(env.ZOE_KV, out.phone);
-      logger.info('human_operator_detected', { chars: out.text.length }, out.phone);
+      logger.info('human_operator_detected', { chars: out.text.length, type: out.spokiType }, out.phone);
       return;
     }
 
