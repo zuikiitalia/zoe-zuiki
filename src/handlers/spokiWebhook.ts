@@ -14,7 +14,7 @@ import {
 } from '../storage/kvStore';
 import { processMessage } from '../orchestrator/claudeOrchestrator';
 import { sendSpokiMessage } from '../clients/spokiClient';
-import { phoneHash, upsertConversation, updateSentiment } from '../analytics/db';
+import { phoneHash, upsertConversation, updateSentiment, appendMessage, loadFullHistory } from '../analytics/db';
 import { analyzeSentiment } from '../analytics/sentiment';
 import { CLAUDE_MODEL } from '../config';
 
@@ -201,26 +201,28 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         return;
       }
       const isAutomation = t === 'template' || t === 'whatsapp_campaign' || t === 'campaign';
+      const now = Date.now();
+      const outboundContent = isAutomation
+        ? `[Notifica Zuiki]: ${out.text}`
+        : `[Operatore CC]: ${out.text}`;
+      // Salvataggio permanente in D1 (no scadenza).
+      if (env.ZOE_DB) {
+        const pHashOut = await phoneHash(out.phone);
+        await appendMessage(env.ZOE_DB, pHashOut, 'assistant', outboundContent, now)
+          .catch((e) => logger.error('d1_append_outbound_failed', { error: String(e) }, out.phone));
+      }
+      // KV mirror (cache breve per coerenza con il resto del flusso).
+      const prev = await loadConversation(env.ZOE_KV, out.phone);
+      const updated: StoredMessage[] = [
+        ...prev,
+        { role: 'assistant', content: outboundContent, ts: now },
+      ];
+      await saveConversation(env.ZOE_KV, out.phone, updated);
       if (isAutomation) {
-        const now = Date.now();
-        const prev = await loadConversation(env.ZOE_KV, out.phone);
-        const updated: StoredMessage[] = [
-          ...prev,
-          { role: 'assistant', content: `[Notifica Zuiki]: ${out.text}`, ts: now },
-        ];
-        await saveConversation(env.ZOE_KV, out.phone, updated);
         logger.info('outbound_automation_saved', { chars: out.text.length, type: out.spokiType }, out.phone);
         return;
       }
-      // Tipo "Message" (manuale) o sconosciuto → operatore umano.
-      // Salviamo il messaggio taggato e settiamo human_active come hint per Zoe.
-      const now = Date.now();
-      const prev = await loadConversation(env.ZOE_KV, out.phone);
-      const updatedHuman: StoredMessage[] = [
-        ...prev,
-        { role: 'assistant', content: `[Operatore CC]: ${out.text}`, ts: now },
-      ];
-      await saveConversation(env.ZOE_KV, out.phone, updatedHuman);
+      // Operatore umano: marchiamo come hint per il prossimo turno di Claude.
       await markHumanActive(env.ZOE_KV, out.phone);
       logger.info('human_operator_detected', { chars: out.text.length, type: out.spokiType }, out.phone);
       return;
@@ -290,10 +292,22 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       return;
     }
 
-    const history = await loadConversation(env.ZOE_KV, phone);
-
-    // Calcola convId per analytics: hash(phone) + '_' + timestamp del primo messaggio.
+    // Carichiamo l'intera storia con il cliente da D1 (permanente, no scadenza).
+    // KV come fallback se D1 non disponibile.
     const pHash = env.ZOE_DB ? await phoneHash(phone) : '';
+    let history: StoredMessage[];
+    if (env.ZOE_DB && pHash) {
+      const rows = await loadFullHistory(env.ZOE_DB, pHash).catch(() => []);
+      history = rows.map(r => ({ role: r.role, content: r.content, ts: r.ts }));
+      // Fallback: se D1 è vuoto (es. conversazione iniziata prima della migrazione),
+      // proviamo a recuperare la storia dal KV.
+      if (history.length === 0) {
+        history = await loadConversation(env.ZOE_KV, phone);
+      }
+    } else {
+      history = await loadConversation(env.ZOE_KV, phone);
+    }
+
     const firstTs = history.length > 0 ? (history[0]?.ts ?? Date.now()) : Date.now();
     const convId = pHash ? `${pHash}_${firstTs}` : '';
 
@@ -319,14 +333,18 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       const userContent = images.length > 0
         ? `${text || '(immagine senza testo)'} [${images.length} immagine/i ricevuta/e]`
         : text;
+      const placeholder = '(silenzio intenzionale: ho applicato anti-loop dopo rifiuti consecutivi)';
       const updated: StoredMessage[] = [
         ...history,
         { role: 'user', content: userContent, ts: now },
-        // Placeholder breve per non rompere il pattern alternato user/assistant in history.
-        // Non viene mai inviato, è solo memoria interna.
-        { role: 'assistant' as const, content: '(silenzio intenzionale: ho applicato anti-loop dopo rifiuti consecutivi)', ts: now },
+        { role: 'assistant' as const, content: placeholder, ts: now },
       ];
       await saveConversation(env.ZOE_KV, phone, updated);
+      // Persistenza D1.
+      if (env.ZOE_DB && pHash) {
+        await appendMessage(env.ZOE_DB, pHash, 'user', userContent, now).catch(() => {});
+        await appendMessage(env.ZOE_DB, pHash, 'assistant', placeholder, now).catch(() => {});
+      }
       return;
     }
 
@@ -361,6 +379,13 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         ...sentReplies.map((r) => ({ role: 'assistant' as const, content: r, ts: now })),
       ];
       await saveConversation(env.ZOE_KV, phone, updated);
+      // Persistenza D1 (no scadenza).
+      if (env.ZOE_DB && pHash) {
+        await appendMessage(env.ZOE_DB, pHash, 'user', userContent, now).catch(() => {});
+        for (const r of sentReplies) {
+          await appendMessage(env.ZOE_DB, pHash, 'assistant', r, now).catch(() => {});
+        }
+      }
 
       // Scrivi dati analytics in D1 (awaited: siamo dentro waitUntil, non blocca il client).
       if (env.ZOE_DB && convId) {

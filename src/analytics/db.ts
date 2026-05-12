@@ -99,6 +99,45 @@ export async function insertToolCall(db: D1Database, convId: string, call: ToolC
   `).bind(id, convId, Date.now(), call.toolName, call.success ? 1 : 0).run();
 }
 
+// === Storia permanente messaggi (no scadenza) ===
+// Ogni messaggio (cliente, Zoe, operatore CC, automazione) viene salvato in D1.
+// Quando Zoe deve rispondere, carichiamo l'intera storia per il phone_hash.
+
+export interface StoredMsgRow {
+  role: 'user' | 'assistant';
+  content: string;
+  ts: number;
+}
+
+export async function appendMessage(
+  db: D1Database,
+  phoneHashStr: string,
+  role: 'user' | 'assistant',
+  content: string,
+  ts: number
+): Promise<void> {
+  // ID univoco: phoneHash + ts + role + nonce. INSERT OR IGNORE evita duplicati su retry.
+  const nonce = Math.random().toString(36).slice(2, 7);
+  const id = `${phoneHashStr}_${ts}_${role}_${nonce}`;
+  await db.prepare(
+    `INSERT OR IGNORE INTO messages (id, phone_hash, ts, role, content) VALUES (?,?,?,?,?)`
+  ).bind(id, phoneHashStr, ts, role, content).run();
+}
+
+export async function loadFullHistory(
+  db: D1Database,
+  phoneHashStr: string
+): Promise<StoredMsgRow[]> {
+  const res = await db.prepare(
+    `SELECT role, content, ts FROM messages WHERE phone_hash = ? ORDER BY ts ASC`
+  ).bind(phoneHashStr).all<{ role: string; content: string; ts: number }>();
+  return (res.results ?? []).map(r => ({
+    role: r.role === 'user' ? 'user' : 'assistant',
+    content: r.content,
+    ts: r.ts,
+  }));
+}
+
 export async function updateSentiment(
   db: D1Database,
   convId: string,

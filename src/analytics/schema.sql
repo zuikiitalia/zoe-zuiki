@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   FOREIGN KEY (conv_id) REFERENCES conversations(id)
 );
 
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,                    -- phone_hash + ts + role + nonce
+  phone_hash TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  role TEXT NOT NULL,                     -- 'user' | 'assistant'
+  content TEXT NOT NULL                   -- testo del messaggio (taggato [Operatore CC]: / [Notifica Zuiki]: dove applicabile)
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_phone_hash_ts ON messages(phone_hash, ts);
 CREATE INDEX IF NOT EXISTS idx_conversations_first_ts ON conversations(first_ts);
 CREATE INDEX IF NOT EXISTS idx_conversations_phone_hash ON conversations(phone_hash);
 CREATE INDEX IF NOT EXISTS idx_conversations_ticket_category ON conversations(ticket_category);
