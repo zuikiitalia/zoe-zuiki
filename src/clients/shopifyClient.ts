@@ -387,12 +387,16 @@ export async function searchProducts(env: Env, q: string, limit = 5): Promise<Pr
   // Se 0 risultati e la query sembra uno SKU (es. "Z8401GI", "B6E211TS"),
   // riprova con filtro sku: che cerca sulle varianti del prodotto.
   if (/^[A-Z0-9]{5,12}$/i.test(q.trim())) {
-    const skuData = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${q.trim()}`, first: limit });
-    if (skuData.products.edges.length > 0) return mapResult(skuData);
-    // Secondo tentativo: sku con wildcard tramite prefisso (cerca anche varianti colore/taglia)
-    const skuBase = q.trim().replace(/[-_].*/,'');
-    const skuWild = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${skuBase}`, first: limit });
-    return mapResult(skuWild);
+    // Tentativo 1: SKU esatto sulle varianti.
+    const skuExact = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${q.trim().toUpperCase()}`, first: limit });
+    if (skuExact.products.edges.length > 0) return mapResult(skuExact);
+    // Tentativo 2: prefisso SKU (cattura varianti con suffissi tipo -S-MIL, -M-BIA).
+    // Solo se il codice base (senza numeri finali) è più corto della query originale.
+    const skuBase = q.trim().replace(/\d+[A-Z]{2}$/i, '').toUpperCase(); // es. B6E199TS → B6E199
+    if (skuBase.length > 3 && skuBase !== q.trim().toUpperCase()) {
+      const skuPrefix = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${skuBase}`, first: limit });
+      if (skuPrefix.products.edges.length > 0) return mapResult(skuPrefix);
+    }
   }
 
   return mapResult(data);
@@ -448,7 +452,32 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
     } | null;
   };
   const data = await shopifyGraphQL<Resp>(env, query, { handle });
-  const p = data.productByHandle;
+  let p = data.productByHandle;
+
+  // Fallback: se l'handle diretto fallisce (handle con suffisso nome prodotto),
+  // prova a trovare il prodotto cercando per sku: (handle spesso è il codice SKU).
+  if (!p) {
+    const skuUpper = handle.toUpperCase();
+    const skuQuery = `
+      query SearchBySku($q: String!) {
+        products(first: 1, query: $q) {
+          edges { node {
+            title handle onlineStoreUrl description totalInventory
+            priceRangeV2 {
+              minVariantPrice { amount currencyCode }
+              maxVariantPrice { amount currencyCode }
+            }
+            variants(first: 50) {
+              edges { node { title availableForSale inventoryQuantity price barcode } }
+            }
+          }}
+        }
+      }`;
+    type SkuResp = { products: { edges: Array<{ node: typeof p }> } };
+    const skuData = await shopifyGraphQL<SkuResp>(env, skuQuery, { q: `sku:${skuUpper}` });
+    p = skuData.products.edges[0]?.node ?? null;
+  }
+
   if (!p) return { found: false };
   return {
     found: true,
