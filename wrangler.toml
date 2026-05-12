@@ -29,7 +29,7 @@ index_name = "zuiki-products"
 [[d1_databases]]
 binding = "ZOE_DB"
 database_name = "zoe-analytics"
-database_id = "PLACEHOLDER_DB_ID"
+database_id = "fe45c86c-c4bd-4385-bd06-64a2516c49bb"
 
 # Cron job ogni 30 min per tenere lo HF Space FashionCLIP sveglio (no cold start).
 [triggers]
