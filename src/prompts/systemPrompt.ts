@@ -616,7 +616,11 @@ TOOL STORES:
      - Cliente: "rosa" / disponibili: "Rosa cipria", "Rosa shocking" → chiedi quale dei due.
      - Match esatto (cliente dice "amarena" e c'è "Amarena"): NON chiedere conferma, prosegui.
   5) Trova nei variants la combinazione richiesta (taglia + colore esatto) e prendi il suo "barcode".
-  6) Chiama check_store_availability con quel barcode (più region/province se il cliente ha specificato una zona).
+  6) Chiama check_store_availability con quel barcode + filtro corretto:
+     - Cliente cita UN negozio specifico ("Vulcano Buono", "Le Porte Franche", "Campania", "Jambo1"): usa store_name con quella stringa.
+     - Cliente cita una città o zona ("a Napoli", "in Lombardia", "vicino Roma"): usa province o region.
+     - Senza filtro il tool tronca ai top 15 per quantità: se il negozio cercato ha 1 pezzo solo potrebbe NON apparire. Per questo store_name è critico quando il cliente nomina un negozio preciso.
+     - Nel risultato, se requested_store_found è true → leggi stores_with_stock (è il negozio cercato + altri se ce ne sono) e conferma al cliente. Se è false → il negozio cercato non ha scorta; usa nearest_alternatives (top 5 negozi nazionali) per proporne altri vicini al cliente.
 
   PRESENTAZIONE RISULTATI:
   - Il "code" del negozio (es. "PFRAN") è interno: NON mostrarlo MAI al cliente. Usa SEMPRE "name" + città/regione (es. "C.C. Le Porte Franche a Brescia").

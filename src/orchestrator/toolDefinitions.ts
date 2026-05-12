@@ -108,13 +108,17 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
   {
     name: 'check_store_availability',
     description:
-      "Controlla in quali negozi fisici Zuiki e' disponibile un prodotto in una specifica taglia/variante. Usalo quando il cliente chiede 'avete X in negozio?', 'in che negozio trovo X?', 'X e' disponibile a Milano?'. PRIMA chiama get_product_by_handle per ottenere il barcode della variante (taglia) richiesta, POI chiama questo tool con quel barcode. Opzionale: filtra per regione/provincia/citta' per mostrare solo i negozi rilevanti. Ritorna la lista dei negozi con stock > 0 ordinata per quantita' decrescente, con codice, nome, regione, provincia, quantita'. Se il cliente vuole indirizzo/orari/maps di un negozio specifico, usa POI search_stores con il nome del negozio.",
+      "Controlla in quali negozi fisici Zuiki e' disponibile un prodotto in una specifica taglia/variante. Usalo quando il cliente chiede 'avete X in negozio?', 'in che negozio trovo X?', 'X e' disponibile a Milano?', 'c'e' al Vulcano Buono?'. PRIMA chiama get_product_by_handle per ottenere il barcode della variante (taglia) richiesta, POI chiama questo tool con quel barcode. FILTRI (usa quello piu' specifico in base alla richiesta): store_name per un negozio specifico (es. 'Vulcano Buono'), province per una citta'/zona ('Napoli', 'Milano'), region per una regione. Senza filtri ritorna i top 15 per quantita' (potrebbe NON includere il negozio che cerchi se ha poca scorta). Ritorna sempre total_units_nationwide e requested_store_found (true/false se hai usato store_name).",
     input_schema: {
       type: 'object',
       properties: {
         barcode: {
           type: 'string',
           description: "Barcode (EAN) della variante del prodotto, ottenuto da get_product_by_handle (campo variants[].barcode). E' specifico per taglia/colore: non confondere con SKU.",
+        },
+        store_name: {
+          type: 'string',
+          description: "Nome (o pezzo del nome) del negozio specifico richiesto dal cliente, es. 'Vulcano Buono', 'Le Porte Franche', 'Campania', 'Jambo1'. USA QUESTO quando il cliente nomina UN negozio preciso — match per substring sul nome del negozio. Non usarlo se il cliente cita solo una citta'/regione: in quel caso usa province/region.",
         },
         region: {
           type: 'string',

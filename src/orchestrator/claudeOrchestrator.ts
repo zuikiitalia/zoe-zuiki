@@ -147,16 +147,31 @@ async function executeTool(
         if (!barcode) return JSON.stringify({ error: 'missing_barcode' });
         const regionFilter = (input.region as string | undefined)?.toLowerCase().trim();
         const provinceFilter = (input.province as string | undefined)?.toLowerCase().trim();
+        const nameQuery = (input.store_name as string | undefined)?.toLowerCase().trim();
         const maxResults = Math.max(1, Math.min(50, Number(input.max_results) || 15));
 
         const avail = await checkBarcodeAvailability(barcode);
-        let stores = avail.stores;
-        if (regionFilter) stores = stores.filter((s) => s.region.toLowerCase().includes(regionFilter));
-        if (provinceFilter) stores = stores.filter((s) => s.province.toLowerCase().includes(provinceFilter));
-        const truncated = stores.length > maxResults;
-        stores = stores.slice(0, maxResults);
+        let filtered = avail.stores;
+        if (regionFilter) filtered = filtered.filter((s) => s.region.toLowerCase().includes(regionFilter));
+        if (provinceFilter) filtered = filtered.filter((s) => s.province.toLowerCase().includes(provinceFilter));
+        if (nameQuery) filtered = filtered.filter((s) => s.name.toLowerCase().includes(nameQuery));
+
+        const requestedStoreFound = nameQuery ? filtered.length > 0 : null;
+
+        // Se store_name è stato passato e non c'è match, fornisci ALTERNATIVE
+        // (top negozi nazionali per quantità) così Zoe può proporle al cliente.
+        let alternatives: typeof avail.stores = [];
+        if (nameQuery && filtered.length === 0) {
+          alternatives = avail.stores.slice(0, 5);
+        }
+
+        const truncated = filtered.length > maxResults;
+        const stores = filtered.slice(0, maxResults);
         logger.info('check_store_availability', {
-          barcode, total: avail.total, returned: stores.length, region: regionFilter, province: provinceFilter,
+          barcode, total: avail.total, returned: stores.length,
+          region: regionFilter, province: provinceFilter, store_name: nameQuery,
+          requested_store_found: requestedStoreFound,
+          alternatives_count: alternatives.length,
         }, phone);
         return JSON.stringify({
           found: avail.found,
@@ -164,6 +179,8 @@ async function executeTool(
           total_units_nationwide: avail.total,
           stores_with_stock: stores,
           truncated,
+          requested_store_found: requestedStoreFound,
+          nearest_alternatives: alternatives.length > 0 ? alternatives : undefined,
         });
       }
       case 'find_similar_product': {
