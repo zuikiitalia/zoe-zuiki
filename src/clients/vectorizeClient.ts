@@ -11,26 +11,52 @@ export interface SimilarProductMatch {
   similarity: number;
 }
 
+const HF_SPACE_EMBED_PATH = '/embed';
+
 /**
- * Calcola l'embedding testuale di una query tramite Cloudflare AI (qwen3-embedding-0.6b).
- * Restituisce null se il binding AI non è disponibile o la call fallisce.
+ * Chiama lo HF Space FashionCLIP con un'immagine base64.
+ * Ritorna vettore 512-dim normalizzato o null.
  */
-export async function computeTextEmbedding(
+export async function computeImageEmbeddingFashionCLIP(
   env: Env,
-  text: string
+  imageBase64: string,
 ): Promise<number[] | null> {
-  if (!env.AI) return null;
+  if (!env.HF_SPACE_URL) return null;
+  return callFashionCLIPSpace(env, { image_b64: imageBase64, image_url: '', text: '' });
+}
+
+/**
+ * Chiama lo HF Space FashionCLIP con un testo.
+ * Testo e immagini sono nello stesso spazio 512-dim → fallback affidabile.
+ */
+export async function computeTextEmbeddingFashionCLIP(
+  env: Env,
+  text: string,
+): Promise<number[] | null> {
+  if (!env.HF_SPACE_URL) return null;
+  return callFashionCLIPSpace(env, { image_b64: '', image_url: '', text });
+}
+
+async function callFashionCLIPSpace(
+  env: Env,
+  input: { image_url: string; image_b64: string; text: string }
+): Promise<number[] | null> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await (env.AI as any).run('@cf/qwen/qwen3-embedding-0.6b', {
-      text,
-    }) as { data: number[][] } | number[][];
-    const data = Array.isArray(result) ? result : result?.data;
-    const embedding = Array.isArray(data?.[0]) ? data[0] : null;
-    if (!embedding || embedding.length === 0) return null;
+    const res = await fetch(`${env.HF_SPACE_URL}${HF_SPACE_EMBED_PATH}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_url: input.image_url, image_b64: input.image_b64, text: input.text }),
+    });
+    if (!res.ok) {
+      logger.warn('fashion_clip_space_error', { status: res.status });
+      return null;
+    }
+    const json = await res.json() as { embedding?: number[] };
+    const embedding = json.embedding;
+    if (!Array.isArray(embedding) || embedding.length === 0) return null;
     return embedding;
   } catch (err) {
-    logger.error('text_embedding_failed', {
+    logger.error('fashion_clip_space_failed', {
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
@@ -38,7 +64,7 @@ export async function computeTextEmbedding(
 }
 
 /**
- * Interroga Vectorize con un embedding testuale e ritorna i prodotti più simili.
+ * Interroga Vectorize e ritorna i prodotti più simili.
  * Se skuSuffix è fornito, filtra per categoria (es. "CA" = solo camicie).
  */
 export async function findSimilarProducts(

@@ -9,16 +9,14 @@ export interface Env {
   WEBHOOK_SECRET: string;
   TEAM_EMAIL: string;
   WHATSAPP_NUMBER: string;
-  // CSV di numeri in formato E.164 (es. "+393349445282,+393385964641").
-  // Se presente e non vuota, Zoe risponde SOLO a questi numeri (modalità test/restricted).
-  // Se assente o vuota, Zoe risponde a tutti.
   ALLOWLIST_PHONES?: string;
-  // Cloudflare AI (CLIP) — presente dopo setup wrangler.toml [ai].
-  // Opzionale: se assente, find_similar_product restituisce solo il link di ricerca.
+  HF_SPACE_URL?: string;
   AI?: Ai;
-  // Cloudflare Vectorize — presente dopo setup wrangler.toml [[vectorize]].
-  // Richiede anche l'indicizzazione one-time con scripts/indexProducts.ts.
   PRODUCT_VECTORS?: VectorizeIndex;
+  // D1 database per analytics (conversazioni, token, costi, sentiment).
+  ZOE_DB?: D1Database;
+  // Password per accedere alla dashboard (Bearer token).
+  DASHBOARD_SECRET?: string;
 }
 
 export const CLAUDE_MODEL = 'claude-sonnet-4-6';
