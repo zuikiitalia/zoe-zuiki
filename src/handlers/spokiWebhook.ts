@@ -11,6 +11,9 @@ import {
 } from '../storage/kvStore';
 import { processMessage } from '../orchestrator/claudeOrchestrator';
 import { sendSpokiMessage } from '../clients/spokiClient';
+import { phoneHash, upsertConversation, updateSentiment } from '../analytics/db';
+import { analyzeSentiment } from '../analytics/sentiment';
+import { CLAUDE_MODEL } from '../config';
 
 interface InboundMessage {
   phone: string;
@@ -168,9 +171,14 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
 
     const history = await loadConversation(env.ZOE_KV, phone);
 
+    // Calcola convId per analytics: hash(phone) + '_' + timestamp del primo messaggio.
+    const pHash = env.ZOE_DB ? await phoneHash(phone) : '';
+    const firstTs = history.length > 0 ? (history[0]?.ts ?? Date.now()) : Date.now();
+    const convId = pHash ? `${pHash}_${firstTs}` : '';
+
     let replies: string[];
     try {
-      replies = await processMessage(env, phone, text, history, undefined, images);
+      replies = await processMessage(env, phone, text, history, undefined, images, convId || undefined);
     } catch (err) {
       logger.error(
         'orchestrator_failed',
@@ -232,6 +240,32 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         ...sentReplies.map((r) => ({ role: 'assistant' as const, content: r, ts: now })),
       ];
       await saveConversation(env.ZOE_KV, phone, updated);
+
+      // Scrivi dati analytics in D1 (async, non blocca).
+      if (env.ZOE_DB && convId) {
+        const userTurns = updated.filter(m => m.role === 'user').length;
+        const assistantTurns = updated.filter(m => m.role === 'assistant').length;
+
+        upsertConversation(env.ZOE_DB, {
+          convId,
+          phoneHash: pHash,
+          firstTs,
+          lastTs: now,
+          userTurns,
+          assistantTurns,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCacheReadTokens: 0,
+          totalCostUsd: 0,
+        }).catch(() => {});
+
+        // Sentiment analysis async su conversazioni con almeno 4 scambi.
+        if (updated.length >= 4 && env.ANTHROPIC_API_KEY) {
+          analyzeSentiment(env.ANTHROPIC_API_KEY, updated).then(result => {
+            updateSentiment(env.ZOE_DB!, convId, result.sentiment, result.note).catch(() => {});
+          }).catch(() => {});
+        }
+      }
     }
   } catch (err) {
     logger.error('webhook_async_failed', {

@@ -23,6 +23,8 @@ import {
 import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
 import { getCategoryName } from '../data/skuSuffixes';
+import { insertApiCall, insertToolCall, upsertConversation } from '../analytics/db';
+import type { ApiCallData } from '../analytics/db';
 
 const STORES_CDN_URL = 'https://cdn.shopify.com/s/files/1/0624/0642/6862/files/stores.json?v=1774869600';
 
@@ -116,7 +118,8 @@ async function executeTool(
   phone: string,
   name: string,
   input: Record<string, unknown>,
-  clipEmbedding?: number[] | null
+  clipEmbedding?: number[] | null,
+  convId?: string
 ): Promise<string> {
   try {
     switch (name) {
@@ -260,6 +263,22 @@ async function executeTool(
         const details = String(input.details ?? '');
         const urgency = String(input.urgency ?? 'normal');
         const ticketId = `ZOE-${Date.now()}`;
+
+        // Aggiorna subito la riga conversations con dati ticket (se DB disponibile).
+        if (env.ZOE_DB && convId) {
+          upsertConversation(env.ZOE_DB, {
+            convId,
+            phoneHash: '',
+            firstTs: Date.now(),
+            lastTs: Date.now(),
+            userTurns: 0,
+            assistantTurns: 0,
+            ticketId,
+            ticketCategory: category,
+            ticketReason: reason,
+            ticketUrgency: urgency,
+          }).catch(() => {});
+        }
 
         // 1) Log strutturato (sempre, è fallback e audit trail)
         logger.info(
@@ -463,7 +482,8 @@ export async function processMessage(
   userMessage: string,
   history: StoredMessage[],
   anthropicClient?: Anthropic,
-  images: string[] = []
+  images: string[] = [],
+  convId?: string
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
@@ -514,19 +534,34 @@ export async function processMessage(
       messages,
     });
     const latency = Date.now() - t0;
+    const usage = response.usage;
     logger.info(
       'claude_api_call',
       {
         iteration: iterations,
         stop_reason: response.stop_reason,
-        tokens_in: response.usage?.input_tokens,
-        tokens_out: response.usage?.output_tokens,
-        cache_read: response.usage?.cache_read_input_tokens,
-        cache_create: response.usage?.cache_creation_input_tokens,
+        tokens_in: usage?.input_tokens,
+        tokens_out: usage?.output_tokens,
+        cache_read: usage?.cache_read_input_tokens,
+        cache_create: usage?.cache_creation_input_tokens,
         latency_ms: latency,
       },
       phone
     );
+    // Scrivi la chiamata API nel database analytics (async, non blocca).
+    if (env.ZOE_DB && convId && usage) {
+      const callData: ApiCallData = {
+        model: CLAUDE_MODEL,
+        inputTokens: usage.input_tokens ?? 0,
+        outputTokens: usage.output_tokens ?? 0,
+        cacheReadTokens: (usage as unknown as Record<string,number>).cache_read_input_tokens ?? 0,
+        cacheCreationTokens: (usage as unknown as Record<string,number>).cache_creation_input_tokens ?? 0,
+        latencyMs: latency,
+        iteration: iterations,
+        stopReason: response.stop_reason ?? '',
+      };
+      insertApiCall(env.ZOE_DB, convId, callData).catch(() => {});
+    }
 
     if (response.stop_reason === 'tool_use') {
       if (iterations >= MAX_TOOL_ITERATIONS) {
@@ -542,7 +577,11 @@ export async function processMessage(
             { tool: block.name, input: block.input },
             phone
           );
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding);
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId);
+          // Traccia tool call nel DB analytics.
+          if (env.ZOE_DB && convId) {
+            insertToolCall(env.ZOE_DB, convId, { toolName: block.name, success: true }).catch(() => {});
+          }
           toolResults.push({
             type: 'tool_result',
             tool_use_id: block.id,

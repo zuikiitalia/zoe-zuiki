@@ -3,6 +3,7 @@ import type { Env } from './config';
 import { handleSpokiWebhook } from './handlers/spokiWebhook';
 import { handleShopifyInstall } from './handlers/shopifyInstall';
 import { handleShopifyCallback } from './handlers/shopifyCallback';
+import { handleDashboardHTML, handleDashboardAPI } from './handlers/dashboard';
 import { logger } from './utils/logger';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -11,6 +12,8 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 app.post('/webhook/spoki', handleSpokiWebhook);
 app.get('/shopify/install', handleShopifyInstall);
 app.get('/shopify/callback', handleShopifyCallback);
+app.get('/dashboard', handleDashboardHTML);
+app.get('/dashboard/api/*', handleDashboardAPI);
 
 app.notFound((c) => c.json({ error: 'not_found' }, 404));
 
