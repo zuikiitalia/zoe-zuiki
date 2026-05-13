@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import type { Env } from '../config';
-import { INTER_MESSAGE_DELAY_MS } from '../config';
+import { INTER_MESSAGE_DELAY_MS, MAX_CLAUDE_HISTORY_MESSAGES } from '../config';
 import { verifySpokiWebhook } from '../utils/security';
 import { logger } from '../utils/logger';
 import {
@@ -311,9 +311,13 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
     const firstTs = history.length > 0 ? (history[0]?.ts ?? Date.now()) : Date.now();
     const convId = pHash ? `${pHash}_${firstTs}` : '';
 
+    // Tronca la storia inviata a Claude: D1 ha la storia completa (per dashboard e analytics)
+    // ma Claude riceve solo gli ultimi MAX_CLAUDE_HISTORY_MESSAGES per evitare timeout/token limits.
+    const historyForClaude = history.slice(-MAX_CLAUDE_HISTORY_MESSAGES);
+
     let replies: string[];
     try {
-      replies = await processMessage(env, phone, text, history, undefined, images, convId || undefined, humanActive);
+      replies = await processMessage(env, phone, text, historyForClaude, undefined, images, convId || undefined, humanActive);
     } catch (err) {
       logger.error(
         'orchestrator_failed',

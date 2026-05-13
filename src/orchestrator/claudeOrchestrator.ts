@@ -639,17 +639,38 @@ export async function processMessage(
   let finalText = '';
   let exhausted = false;
 
+  // Chiama l'API Anthropic con retry su errori transitori (429, 529, 503).
+  // Timeout 25s per evitare che il Worker resti appeso se Anthropic è lento.
+  async function callClaude(attempt = 0): Promise<Anthropic.Message> {
+    try {
+      return await anthropic.messages.create(
+        {
+          model: CLAUDE_MODEL,
+          max_tokens: CLAUDE_MAX_TOKENS,
+          system: systemBlocks,
+          tools: TOOL_DEFINITIONS,
+          messages,
+        },
+        { signal: AbortSignal.timeout(25_000) }
+      );
+    } catch (err) {
+      const status = (err as { status?: number }).status ?? 0;
+      const isRetryable = status === 429 || status === 503 || status === 529 || status === 0;
+      if (isRetryable && attempt < 2) {
+        const backoff = (attempt + 1) * 1000;
+        logger.warn('claude_api_retry', { attempt, status, backoff_ms: backoff }, phone);
+        await new Promise(res => setTimeout(res, backoff));
+        return callClaude(attempt + 1);
+      }
+      throw err;
+    }
+  }
+
   while (iterations <= MAX_TOOL_ITERATIONS) {
     const t0 = Date.now();
     let response: Anthropic.Message;
     try {
-      response = await anthropic.messages.create({
-        model: CLAUDE_MODEL,
-        max_tokens: CLAUDE_MAX_TOKENS,
-        system: systemBlocks,
-        tools: TOOL_DEFINITIONS,
-        messages,
-      });
+      response = await callClaude();
     } catch (err) {
       logger.error('claude_api_failed', {
         iteration: iterations,

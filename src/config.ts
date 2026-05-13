@@ -22,6 +22,9 @@ export interface Env {
 export const CLAUDE_MODEL = 'claude-sonnet-4-6';
 export const CLAUDE_MAX_TOKENS = 1024;
 export const MAX_HISTORY_MESSAGES = 20;
+// Messaggi inviati a Claude: D1 carica la storia completa ma mandiamo solo gli ultimi N.
+// Evita timeout e limiti token su conversazioni lunghe (cliente con mesi di chat).
+export const MAX_CLAUDE_HISTORY_MESSAGES = 80;
 export const CONVERSATION_TTL_SECONDS = 60 * 60 * 24 * 7;
 export const RATE_LIMIT_TTL_SECONDS = 60 * 60;
 export const RATE_LIMIT_MAX_PER_HOUR = 30;
