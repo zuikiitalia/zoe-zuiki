@@ -13,7 +13,7 @@ import {
   type StoredMessage,
 } from '../storage/kvStore';
 import { processMessage } from '../orchestrator/claudeOrchestrator';
-import { sendSpokiMessage } from '../clients/spokiClient';
+import { sendSpokiMessage, createSpokiTicket } from '../clients/spokiClient';
 import { phoneHash, upsertConversation, updateSentiment, appendMessage, loadFullHistory } from '../analytics/db';
 import { analyzeSentiment } from '../analytics/sentiment';
 import { CLAUDE_MODEL } from '../config';
@@ -237,12 +237,12 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
     }
     let { phone, text, images, contentType } = extracted;
 
-    // Se un operatore umano è attivo, NON blocchiamo Claude completamente:
-    // passiamo il flag humanActive così Claude legge la history (con messaggi
-    // taggati [Operatore CC]) e decide autonomamente di fare [NO_REPLY].
+    // HARD BLOCK: se un operatore umano ha preso la conversazione, Zoe non risponde mai.
+    // Nessun hint, nessuna delega a Claude: blocco immediato e definitivo.
     const humanActive = await isHumanActive(env.ZOE_KV, phone);
     if (humanActive) {
-      logger.info('human_active_hint_passed', { content_type: contentType }, phone);
+      logger.info('human_active_hard_block', { content_type: contentType }, phone);
+      return;
     }
 
     // Nota vocale: trascrive con Cloudflare Whisper e tratta come testo normale
@@ -320,8 +320,18 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         { error: err instanceof Error ? err.message : String(err) },
         phone
       );
+      // Errore tecnico: apri ticket immediato per intervento operatore CC.
+      const ticketId = `ZOE-ERR-${Date.now()}`;
+      await createSpokiTicket(env, {
+        phone,
+        category: 'tecnico',
+        reason: 'altro',
+        details: `Errore tecnico automatico durante elaborazione messaggio: ${err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300)}`,
+        urgency: 'normal',
+        zoeTicketId: ticketId,
+      }).catch((e) => logger.error('emergency_ticket_failed', { error: String(e) }, phone));
       replies = [
-        'Sto avendo un problema tecnico, riprova tra qualche minuto o scrivi a shoponline@zuiki.it.',
+        '✅ Ho richiesto l\'intervento di un assistente del customer care. Verrai contattato qui in chat non appena sarà il tuo turno (lun-ven 8-17). Se scrivi fuori orario ti rispondono alla riapertura.',
       ];
     }
 
