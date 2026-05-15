@@ -347,7 +347,7 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       const userContent = images.length > 0
         ? `${text || '(immagine senza testo)'} [${images.length} immagine/i ricevuta/e]`
         : text;
-      const placeholder = '(silenzio intenzionale: ho applicato anti-loop dopo rifiuti consecutivi)';
+      const placeholder = '(silenzio intenzionale: marker [NO_REPLY] emesso da Claude)';
       const updated: StoredMessage[] = [
         ...history,
         { role: 'user', content: userContent, ts: now },
