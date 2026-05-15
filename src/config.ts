@@ -19,7 +19,7 @@ export interface Env {
   DASHBOARD_SECRET?: string;
 }
 
-export const CLAUDE_MODEL = 'claude-sonnet-4-6';
+export const CLAUDE_MODEL = 'claude-opus-4-7';
 export const CLAUDE_MAX_TOKENS = 1024;
 export const MAX_HISTORY_MESSAGES = 20;
 // Messaggi inviati a Claude: D1 carica la storia completa ma mandiamo solo gli ultimi N.
