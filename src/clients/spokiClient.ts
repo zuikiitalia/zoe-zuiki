@@ -1,6 +1,6 @@
 import type { Env } from '../config';
 import { logger } from '../utils/logger';
-import { recordZoeSent } from '../storage/kvStore';
+import { preRecordZoeSent, recordSpokiMessageId } from '../storage/kvStore';
 
 // Endpoint verificati dalla doc Postman ufficiale Spoki (2026-04-24).
 const SPOKI_SEND_URL = 'https://api.spoki.com/api/1/messages/send/';
@@ -22,6 +22,10 @@ export async function sendSpokiMessage(env: Env, phone: string, text: string): P
     text,
   };
 
+  // Pre-registra l'hash PRIMA della chiamata API: Spoki può consegnare il webhook
+  // outbound quasi in contemporanea alla risposta, quindi l'hash deve già essere in KV.
+  await preRecordZoeSent(env.ZOE_KV, phone, text).catch(() => {});
+
   const res = await fetch(SPOKI_SEND_URL, {
     method: 'POST',
     headers,
@@ -33,8 +37,7 @@ export async function sendSpokiMessage(env: Env, phone: string, text: string): P
     logger.error('spoki_send_failed', { status: res.status, body: errorBody.slice(0, 500) }, phone);
     throw new Error(`Spoki send failed: ${res.status}`);
   }
-  // Parsa la response per recuperare l'ID assegnato da Spoki: lo stesso ID arriverà
-  // nel webhook outbound, permettendo un match deterministico (no race / no timing).
+  // Aggiunge anche l'ID Spoki per il match deterministico (ulteriore garanzia).
   let spokiMsgId: string | null = null;
   try {
     const data = (await res.clone().json()) as Record<string, unknown>;
@@ -42,9 +45,11 @@ export async function sendSpokiMessage(env: Env, phone: string, text: string): P
     const id = inner.id ?? inner.message_id ?? inner.external_id ?? data.id;
     if (id !== undefined && id !== null) spokiMsgId = String(id);
   } catch {
-    // Non fatale: cadiamo sul match per hash (già scritto).
+    // Non fatale: il match per hash è già garantito dalla pre-registrazione.
   }
-  await recordZoeSent(env.ZOE_KV, phone, text, spokiMsgId).catch(() => {});
+  if (spokiMsgId) {
+    await recordSpokiMessageId(env.ZOE_KV, spokiMsgId).catch(() => {});
+  }
   logger.info('message_sent', { chars: text.length, spoki_id: spokiMsgId ?? 'none' }, phone);
 }
 

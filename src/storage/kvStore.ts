@@ -70,7 +70,7 @@ export async function checkAndIncrementRateLimit(kv: KVNamespace, phone: string)
 // cui Zoe non risponde più al cliente.
 
 const HUMAN_ACTIVE_TTL = 60 * 60 * 24; // 24h
-const ZOE_SENT_TTL = 60 * 10;           // 10 min: copre eventuali ritardi/retry webhook
+const ZOE_SENT_TTL = 60 * 60;           // 1 ora: copre ritardi webhook e KV eventual consistency
 
 interface ZoeSentEntry { hash: string; ts: number }
 
@@ -89,22 +89,30 @@ export function hashMessageText(text: string): string {
   return quickHash(text.replace(/\s+/g, ' ').trim());
 }
 
+// Chiamare PRIMA della chiamata API Spoki: scrive l'hash in KV così il webhook
+// outbound che arriva quasi in contemporanea trova già il match.
+export async function preRecordZoeSent(kv: KVNamespace, phone: string, text: string): Promise<void> {
+  const key = `zoe_sent:${phone}`;
+  const raw = await kv.get<ZoeSentEntry[]>(key, 'json');
+  const list = Array.isArray(raw) ? raw : [];
+  list.push({ hash: hashMessageText(text), ts: Date.now() });
+  await kv.put(key, JSON.stringify(list.slice(-20)), { expirationTtl: ZOE_SENT_TTL });
+}
+
+// Chiamare DOPO la chiamata API Spoki: aggiunge l'ID Spoki per il match deterministico.
+export async function recordSpokiMessageId(kv: KVNamespace, spokiMessageId: string): Promise<void> {
+  await kv.put(`zoe_msg_id:${spokiMessageId}`, '1', { expirationTtl: ZOE_SENT_TTL });
+}
+
 export async function recordZoeSent(
   kv: KVNamespace,
   phone: string,
   text: string,
   spokiMessageId?: string | null
 ): Promise<void> {
-  const key = `zoe_sent:${phone}`;
-  const raw = await kv.get<ZoeSentEntry[]>(key, 'json');
-  const list = Array.isArray(raw) ? raw : [];
-  list.push({ hash: hashMessageText(text), ts: Date.now() });
-  const trimmed = list.slice(-10);
-  await kv.put(key, JSON.stringify(trimmed), { expirationTtl: ZOE_SENT_TTL });
-  // ID deterministico restituito da Spoki sull'invio: il webhook outbound porta
-  // lo stesso ID, quindi il match è certo (non probabilistico né basato sul tempo).
+  await preRecordZoeSent(kv, phone, text);
   if (spokiMessageId) {
-    await kv.put(`zoe_msg_id:${spokiMessageId}`, '1', { expirationTtl: ZOE_SENT_TTL });
+    await recordSpokiMessageId(kv, spokiMessageId);
   }
 }
 
