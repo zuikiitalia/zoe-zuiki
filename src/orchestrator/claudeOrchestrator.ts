@@ -176,6 +176,10 @@ async function executeTool(
           String(input.order_number ?? ''),
           String(input.email ?? '')
         );
+        if (res.found && res.rma_number && env.RICHRETURNS_API_KEY) {
+          const returnData = await getReturnByRMA(env, res.rma_number).catch(() => null);
+          return JSON.stringify({ ...res, return_status: returnData ?? undefined });
+        }
         return JSON.stringify(res);
       }
       case 'search_products': {
