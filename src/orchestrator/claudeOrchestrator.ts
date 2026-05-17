@@ -291,12 +291,24 @@ async function executeTool(
         const keywords = String(input.search_keywords ?? '').trim();
         const visualDescription = String(input.visual_description ?? '').trim();
 
-        // Link di ricerca testuale: usa solo la prima parola (la più generica) per
-        // evitare URL con 0 risultati su Shopify (es. "piumino+leggero" → nessun risultato,
-        // "piumino" → molti risultati). Parole corte (<4 char) vengono saltate.
-        const keywordTokens = keywords.split(/\s+/).filter(w => w.length >= 4);
-        const searchWord = encodeURIComponent(keywordTokens[0] ?? keywords.split(/\s+/)[0] ?? keywords);
-        const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${searchWord}`;
+        // Costruisce il link di ricerca verificando che la query abbia risultati su Shopify.
+        // Prova prima la query completa, poi accorcia di una parola alla volta finché trova
+        // risultati (o scende a 1 parola). Evita link che portano a "0 risultati".
+        const buildSearchUrl = async (): Promise<string> => {
+          const tokens = keywords.trim().split(/\s+/).filter(Boolean);
+          for (let len = tokens.length; len >= 1; len--) {
+            const q = tokens.slice(0, len).join(' ');
+            try {
+              const res = await searchProducts(env, q);
+              if (res.products.length > 0) {
+                return `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${encodeURIComponent(q)}`;
+              }
+            } catch { /* ignora errori parziali */ }
+          }
+          // Fallback: usa la prima parola anche se 0 risultati (meglio di link completamente rotto)
+          return `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${encodeURIComponent(tokens[0] ?? keywords)}`;
+        };
+        const searchUrl = await buildSearchUrl();
 
         let matchResult: {
           sku: string;
