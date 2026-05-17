@@ -17,6 +17,8 @@ export interface Env {
   ZOE_DB?: D1Database;
   // Password per accedere alla dashboard (Bearer token).
   DASHBOARD_SECRET?: string;
+  // RichReturns API key — se non configurata, Zoe usa il comportamento statico per i resi.
+  RICHRETURNS_API_KEY?: string;
 }
 
 export const CLAUDE_MODEL = 'claude-opus-4-7';

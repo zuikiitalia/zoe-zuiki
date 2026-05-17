@@ -9,6 +9,7 @@ import {
   checkAndIncrementRateLimit,
   isHumanActive,
   markHumanActive,
+  clearHumanActive,
   isOurOutboundEcho,
   type StoredMessage,
 } from '../storage/kvStore';
@@ -29,11 +30,14 @@ interface OutboundMessage {
   phone: string;     // numero del CLIENTE (to_phone in outbound)
   text: string;
   contentType: string;
-  // Tipo Spoki: "Message" (umano), "Template" / "whatsapp_campaign" (automazione),
-  // "Note" (nota interna). Per Zoe: solo "Message" → human_active.
+  // Tipo Spoki: "Message" (umano o API), "Template" / "whatsapp_campaign" (automazione),
+  // "Note" (nota interna).
   spokiType: string;
-  // ID del messaggio Spoki: per il match deterministico con i messaggi inviati da Zoe via API.
+  // ID del messaggio Spoki: per il match deterministico (usato solo come fallback).
   spokiId: string | null;
+  // sender.is_service (V1 webhook): true = inviato via API (Zoe), false = operatore umano.
+  // null = sender assente nel payload (V2 senza expand).
+  isService: boolean | null;
 }
 
 // Estrae direction normalizzato dal payload Spoki.
@@ -150,16 +154,34 @@ function extractOutbound(payload: unknown): OutboundMessage | null {
   if (!text) return null;
 
   const contentType = String(data.content_type ?? message.type ?? p.type ?? 'Text');
-  // type Spoki: distingue "Message" (umano), "Template" (automazione), "Note" (nota), ecc.
+  // type Spoki: distingue "Message" (umano o API), "Template" (automazione), "Note" (nota), ecc.
   const spokiType = String(data.type ?? message.kind ?? '');
-  // ID del messaggio Spoki (deterministico per echo detection).
+  // ID del messaggio Spoki (fallback per echo detection).
   const idRaw = data.id ?? data.message_id ?? data.external_id ?? message.id ?? p.id;
   const spokiId = idRaw !== undefined && idRaw !== null ? String(idRaw) : null;
-  return { phone: String(phoneRaw), text, contentType, spokiType, spokiId };
+  // sender.is_service: true = inviato via API (Zoe), false = operatore umano.
+  // Presente nel payload V1; in V2 richiede expand "sender".
+  const sender = (data.sender ?? {}) as Record<string, unknown>;
+  const isService = typeof sender.is_service === 'boolean' ? sender.is_service : null;
+  return { phone: String(phoneRaw), text, contentType, spokiType, spokiId, isService };
 }
 
 function normalizePhone(p: string): string {
   return p.replace(/\D/g, '');
+}
+
+// Estrae phone e tag name dal payload contact_tag.created / contact_tag.deleted.
+// Struttura reale verificata dalla Spoki API doc (2026-05-17):
+//   { event: "contact_tag.created", data: { contact: { phone }, tag: { name } } }
+function extractTagEvent(payload: unknown): { phone: string; tag: string } | null {
+  const p = payload as Record<string, unknown>;
+  const data = (p.data ?? {}) as Record<string, unknown>;
+  const contact = (data.contact ?? {}) as Record<string, unknown>;
+  const tagObj = (data.tag ?? {}) as Record<string, unknown>;
+  const phone = String(contact.phone ?? '').trim();
+  const tag = String(tagObj.name ?? '').toLowerCase().trim();
+  if (!phone || !tag) return null;
+  return { phone, tag };
 }
 
 function isPhoneAllowed(phone: string, allowlist: string | undefined): boolean {
@@ -176,13 +198,36 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
   try {
     logger.info('webhook_payload_raw', { payload: payload as Record<string, unknown> });
 
+    // TAG EVENTS: l'operatore aggiunge/rimuove il tag "zoe_pausa" dal contatto in Spoki.
+    // Questo è il meccanismo ufficiale per segnalare a Zoe di tacere/riprendere.
+    // Zero ambiguità: azione esplicita dell'operatore, nessun rischio di false positive.
+    const event = String((payload as Record<string, unknown>).event ?? '');
+    if (event === 'contact_tag.created') {
+      const t = extractTagEvent(payload);
+      if (t?.tag === 'zoe_pausa') {
+        await markHumanActive(env.ZOE_KV, t.phone);
+        logger.info('zoe_paused_via_tag', {}, t.phone);
+      }
+      return;
+    }
+    if (event === 'contact_tag.deleted') {
+      const t = extractTagEvent(payload);
+      if (t?.tag === 'zoe_pausa') {
+        await clearHumanActive(env.ZOE_KV, t.phone);
+        logger.info('zoe_resumed_via_tag', {}, t.phone);
+      }
+      return;
+    }
+
     // OUTBOUND: messaggio mandato da Zuiki → cliente.
-    // Distinguiamo tramite il campo Spoki "type":
-    //   - "Message" → operatore umano risponde a mano → human_active 24h, Zoe tace
-    //   - "Template" / "whatsapp_campaign" → automazione (es. "ordine spedito") →
-    //     NON è umano, ma salviamo in history così Zoe ha contesto quando la cliente replica
-    //   - "Note" → nota interna Spoki, non visibile al cliente → ignora
-    //   - Echo di un nostro send (Zoe) → ignora
+    // Logica di classificazione (priorità decrescente):
+    //
+    //  1. Note interne → ignora sempre (non visibili al cliente)
+    //  2. sender.is_service === true → inviato via API o automazione Spoki (mai umano)
+    //       - type Template/campaign → salva in history come [Notifica Zuiki]
+    //       - type Message (Zoe via API) → ignora (già salvato nel flusso principale)
+    //  3. sender.is_service === false + type Message → operatore umano → markHumanActive
+    //  4. sender.is_service === null (V2 senza expand) → fallback hash/tipo
     const direction = getDirection(payload);
     if (direction === 'outbound') {
       const out = extractOutbound(payload);
@@ -190,41 +235,69 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         logger.info('webhook_outbound_ignored', {});
         return;
       }
-      const isEcho = await isOurOutboundEcho(env.ZOE_KV, out.phone, out.text, out.spokiId);
-      if (isEcho) {
-        logger.info('outbound_zoe_echo', { chars: out.text.length, type: out.spokiType, spoki_id: out.spokiId ?? 'none' }, out.phone);
-        return;
-      }
+
       const t = out.spokiType.toLowerCase();
+
+      // 1. Note interne
       if (t === 'note') {
         logger.info('outbound_note_ignored', {}, out.phone);
         return;
       }
-      const isAutomation = t === 'template' || t === 'whatsapp_campaign' || t === 'campaign';
-      const now = Date.now();
-      const outboundContent = isAutomation
-        ? `[Notifica Zuiki]: ${out.text}`
-        : `[Operatore CC]: ${out.text}`;
-      // Salvataggio permanente in D1 (no scadenza).
-      if (env.ZOE_DB) {
-        const pHashOut = await phoneHash(out.phone);
-        await appendMessage(env.ZOE_DB, pHashOut, 'assistant', outboundContent, now)
-          .catch((e) => logger.error('d1_append_outbound_failed', { error: String(e) }, out.phone));
-      }
-      // KV mirror (cache breve per coerenza con il resto del flusso).
-      const prev = await loadConversation(env.ZOE_KV, out.phone);
-      const updated: StoredMessage[] = [
-        ...prev,
-        { role: 'assistant', content: outboundContent, ts: now },
-      ];
-      await saveConversation(env.ZOE_KV, out.phone, updated);
-      if (isAutomation) {
-        logger.info('outbound_automation_saved', { chars: out.text.length, type: out.spokiType }, out.phone);
+
+      const isAutomationType = t === 'template' || t === 'whatsapp_campaign' || t === 'campaign';
+
+      // Helper: salva messaggio outbound in history (D1 + KV)
+      const saveOutboundToHistory = async (content: string) => {
+        const now = Date.now();
+        if (env.ZOE_DB) {
+          const pHashOut = await phoneHash(out.phone);
+          await appendMessage(env.ZOE_DB, pHashOut, 'assistant', content, now)
+            .catch((e) => logger.error('d1_append_outbound_failed', { error: String(e) }, out.phone));
+        }
+        const prev = await loadConversation(env.ZOE_KV, out.phone);
+        await saveConversation(env.ZOE_KV, out.phone, [
+          ...prev,
+          { role: 'assistant', content, ts: now },
+        ]);
+      };
+
+      // 2. API / automazione Spoki (is_service === true)
+      if (out.isService === true) {
+        if (isAutomationType) {
+          // Automazione Spoki (es. "Ordine Spedito", "IN Giacenza") → salva per contesto
+          await saveOutboundToHistory(`[Notifica Zuiki]: ${out.text}`);
+          logger.info('outbound_automation_saved', { type: out.spokiType, chars: out.text.length }, out.phone);
+        } else {
+          // Zoe via API (type Message) → già salvato nel flusso principale, non duplicare
+          logger.info('outbound_zoe_api_ignored', { type: out.spokiType, chars: out.text.length }, out.phone);
+        }
         return;
       }
-      // Operatore umano: marchiamo come hint per il prossimo turno di Claude.
+
+      // 3. Operatore umano (is_service === false + type Message)
+      if (out.isService === false && !isAutomationType) {
+        await saveOutboundToHistory(`[Operatore CC]: ${out.text}`);
+        await markHumanActive(env.ZOE_KV, out.phone);
+        logger.info('human_operator_detected', { chars: out.text.length, type: out.spokiType }, out.phone);
+        return;
+      }
+
+      // 4. Fallback: is_service === null (V2 senza expand "sender")
+      if (isAutomationType) {
+        await saveOutboundToHistory(`[Notifica Zuiki]: ${out.text}`);
+        logger.info('outbound_automation_saved_fallback', { type: out.spokiType }, out.phone);
+        return;
+      }
+      // type Message senza is_service: usa hash detection come ultima risorsa
+      const isEcho = await isOurOutboundEcho(env.ZOE_KV, out.phone, out.text, out.spokiId);
+      if (isEcho) {
+        logger.info('outbound_zoe_echo_hash_fallback', { spoki_id: out.spokiId ?? 'none' }, out.phone);
+        return;
+      }
+      // Non è nostro echo e is_service sconosciuto → trattare come operatore per sicurezza
+      await saveOutboundToHistory(`[Operatore CC]: ${out.text}`);
       await markHumanActive(env.ZOE_KV, out.phone);
-      logger.info('human_operator_detected', { chars: out.text.length, type: out.spokiType }, out.phone);
+      logger.info('outbound_unknown_marked_human', { type: out.spokiType, chars: out.text.length }, out.phone);
       return;
     }
 

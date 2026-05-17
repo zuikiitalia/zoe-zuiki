@@ -49,3 +49,4 @@ crons = ["*/30 * * * *", "0 22 * * *"]
 #   WHATSAPP_NUMBER            (es. +390230550379)
 #   HF_SPACE_URL               (https://aldoinnamorato-zuiki-fashion-clip.hf.space)
 #   DASHBOARD_SECRET           (password per /dashboard)
+#   RICHRETURNS_API_KEY        (Bearer token API RichReturns — Account > Developers > API key)
