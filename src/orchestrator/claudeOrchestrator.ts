@@ -291,9 +291,12 @@ async function executeTool(
         const keywords = String(input.search_keywords ?? '').trim();
         const visualDescription = String(input.visual_description ?? '').trim();
 
-        // Link di ricerca testuale (max 2 parole per avere risultati su Shopify).
-        const queryWords = keywords.split(/\s+/).slice(0, 2).join('+');
-        const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${queryWords}`;
+        // Link di ricerca testuale: usa solo la prima parola (la più generica) per
+        // evitare URL con 0 risultati su Shopify (es. "piumino+leggero" → nessun risultato,
+        // "piumino" → molti risultati). Parole corte (<4 char) vengono saltate.
+        const keywordTokens = keywords.split(/\s+/).filter(w => w.length >= 4);
+        const searchWord = encodeURIComponent(keywordTokens[0] ?? keywords.split(/\s+/)[0] ?? keywords);
+        const searchUrl = `https://www.zuiki.it/search?options%5Bprefix%5D=last&q=${searchWord}`;
 
         let matchResult: {
           sku: string;
