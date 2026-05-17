@@ -380,21 +380,24 @@ export async function searchProducts(env: Env, q: string, limit = 5): Promise<Pr
     })),
   });
 
+  // Admin API restituisce anche prodotti in Bozza — aggiungi sempre status:active.
+  const activeQ = q.includes('status:') ? q : `${q} status:active`;
+
   // Prima prova ricerca testuale normale.
-  const data = await shopifyGraphQL<Resp>(env, gql, { q, first: limit });
+  const data = await shopifyGraphQL<Resp>(env, gql, { q: activeQ, first: limit });
   if (data.products.edges.length > 0) return mapResult(data);
 
   // Se 0 risultati e la query sembra uno SKU (es. "Z8401GI", "B6E211TS"),
   // riprova con filtro sku: che cerca sulle varianti del prodotto.
   if (/^[A-Z0-9]{5,12}$/i.test(q.trim())) {
     // Tentativo 1: SKU esatto sulle varianti.
-    const skuExact = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${q.trim().toUpperCase()}`, first: limit });
+    const skuExact = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${q.trim().toUpperCase()} status:active`, first: limit });
     if (skuExact.products.edges.length > 0) return mapResult(skuExact);
     // Tentativo 2: prefisso SKU (cattura varianti con suffissi tipo -S-MIL, -M-BIA).
     // Solo se il codice base (senza numeri finali) è più corto della query originale.
     const skuBase = q.trim().replace(/\d+[A-Z]{2}$/i, '').toUpperCase(); // es. B6E199TS → B6E199
     if (skuBase.length > 3 && skuBase !== q.trim().toUpperCase()) {
-      const skuPrefix = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${skuBase}`, first: limit });
+      const skuPrefix = await shopifyGraphQL<Resp>(env, gql, { q: `sku:${skuBase} status:active`, first: limit });
       if (skuPrefix.products.edges.length > 0) return mapResult(skuPrefix);
     }
   }
@@ -426,7 +429,7 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
   const query = `
     query GetProduct($handle: String!) {
       productByHandle(handle: $handle) {
-        title handle onlineStoreUrl description totalInventory
+        title handle onlineStoreUrl description totalInventory status
         priceRangeV2 {
           minVariantPrice { amount currencyCode }
           maxVariantPrice { amount currencyCode }
@@ -443,6 +446,7 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
       onlineStoreUrl: string | null;
       description: string;
       totalInventory: number | null;
+      status: string;
       priceRangeV2: ProductDetail['price_range'];
       variants: {
         edges: Array<{
@@ -453,6 +457,9 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
   };
   const data = await shopifyGraphQL<Resp>(env, query, { handle });
   let p = data.productByHandle;
+
+  // Prodotti in Bozza (DRAFT) o Archiviati (ARCHIVED): trattali come non trovati.
+  if (p && p.status !== 'ACTIVE') p = null;
 
   // Fallback: se l'handle diretto fallisce (handle con suffisso nome prodotto),
   // prova a trovare il prodotto cercando per sku: (handle spesso è il codice SKU).
@@ -474,7 +481,7 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
         }
       }`;
     type SkuResp = { products: { edges: Array<{ node: typeof p }> } };
-    const skuData = await shopifyGraphQL<SkuResp>(env, skuQuery, { q: `sku:${skuUpper}` });
+    const skuData = await shopifyGraphQL<SkuResp>(env, skuQuery, { q: `sku:${skuUpper} status:active` });
     p = skuData.products.edges[0]?.node ?? null;
   }
 
