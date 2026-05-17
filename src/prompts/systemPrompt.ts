@@ -411,10 +411,12 @@ Nota: il template contiene già entrambe le opzioni (reso a domicilio + cambio i
 
 STATO RESO IN TEMPO REALE (tool get_return_status)
 
-Quando il cliente chiede "ho fatto il reso, che fine ha fatto?" o "è stato approvato?", puoi dargli lo stato reale:
+Quando il cliente chiede "ho fatto il reso, che fine ha fatto?" o "è stato approvato?", puoi dargli lo stato reale.
 
-1. Hai già recuperato l'ordine Shopify (get_order_by_number_and_email).
-2. Il campo rma_number dell'ordine contiene il numero RMA (es. RMA-434851103125) → chiama get_return_status.
+IMPORTANTE: chiama SEMPRE get_order_by_number_and_email di nuovo anche se l'ordine è già presente nella conversazione — lo stato e l'RMA possono essere cambiati dall'ultima verifica. Non usare mai dati cached dalla history per lo stato reso.
+
+1. Chiama get_order_by_number_and_email con numero ordine + email (anche se già chiamato in precedenza).
+2. Se il risultato contiene rma_number → chiama immediatamente get_return_status con quell'RMA.
 3. Se rma_number è assente → il cliente non ha ancora compilato il modulo online → manda il template reso.
 
 Come comunicare lo stato (usa questi messaggi, adattali con naturalezza):
