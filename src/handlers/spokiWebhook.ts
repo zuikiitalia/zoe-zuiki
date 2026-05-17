@@ -9,6 +9,7 @@ import {
   checkAndIncrementRateLimit,
   isHumanActive,
   markHumanActive,
+  clearHumanActive,
   isOurOutboundEcho,
   type StoredMessage,
 } from '../storage/kvStore';
@@ -162,6 +163,20 @@ function normalizePhone(p: string): string {
   return p.replace(/\D/g, '');
 }
 
+// Estrae phone e tag name dal payload contact_tag.created / contact_tag.deleted.
+// Struttura reale verificata dalla Spoki API doc (2026-05-17):
+//   { event: "contact_tag.created", data: { contact: { phone }, tag: { name } } }
+function extractTagEvent(payload: unknown): { phone: string; tag: string } | null {
+  const p = payload as Record<string, unknown>;
+  const data = (p.data ?? {}) as Record<string, unknown>;
+  const contact = (data.contact ?? {}) as Record<string, unknown>;
+  const tagObj = (data.tag ?? {}) as Record<string, unknown>;
+  const phone = String(contact.phone ?? '').trim();
+  const tag = String(tagObj.name ?? '').toLowerCase().trim();
+  if (!phone || !tag) return null;
+  return { phone, tag };
+}
+
 function isPhoneAllowed(phone: string, allowlist: string | undefined): boolean {
   if (!allowlist || !allowlist.trim()) return true;
   const target = normalizePhone(phone);
@@ -175,6 +190,27 @@ function isPhoneAllowed(phone: string, allowlist: string | undefined): boolean {
 async function processAsync(env: Env, payload: unknown): Promise<void> {
   try {
     logger.info('webhook_payload_raw', { payload: payload as Record<string, unknown> });
+
+    // TAG EVENTS: l'operatore aggiunge/rimuove il tag "zoe_pausa" dal contatto in Spoki.
+    // Questo è il meccanismo ufficiale per segnalare a Zoe di tacere/riprendere.
+    // Zero ambiguità: azione esplicita dell'operatore, nessun rischio di false positive.
+    const event = String((payload as Record<string, unknown>).event ?? '');
+    if (event === 'contact_tag.created') {
+      const t = extractTagEvent(payload);
+      if (t?.tag === 'zoe_pausa') {
+        await markHumanActive(env.ZOE_KV, t.phone);
+        logger.info('zoe_paused_via_tag', {}, t.phone);
+      }
+      return;
+    }
+    if (event === 'contact_tag.deleted') {
+      const t = extractTagEvent(payload);
+      if (t?.tag === 'zoe_pausa') {
+        await clearHumanActive(env.ZOE_KV, t.phone);
+        logger.info('zoe_resumed_via_tag', {}, t.phone);
+      }
+      return;
+    }
 
     // OUTBOUND: messaggio mandato da Zuiki → cliente.
     // Distinguiamo tramite il campo Spoki "type":
@@ -228,13 +264,11 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         { role: 'assistant', content: outboundContent, ts: now },
       ];
       await saveConversation(env.ZOE_KV, out.phone, updated);
-      if (isAutomation) {
-        logger.info('outbound_automation_saved', { chars: out.text.length, type: out.spokiType }, out.phone);
-        return;
-      }
-      // Operatore umano: marchiamo come hint per il prossimo turno di Claude.
-      await markHumanActive(env.ZOE_KV, out.phone);
-      logger.info('human_operator_detected', { chars: out.text.length, type: out.spokiType }, out.phone);
+      // Salviamo in history sia le automazioni che i messaggi operatore:
+      // Zoe avrà contesto completo quando il cliente risponde.
+      // Il rilevamento operatore avviene esclusivamente via tag "zoe_pausa" (contact_tag events).
+      const logEvent = isAutomation ? 'outbound_automation_saved' : 'outbound_operator_saved';
+      logger.info(logEvent, { chars: out.text.length, type: out.spokiType }, out.phone);
       return;
     }
 
