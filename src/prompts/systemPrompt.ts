@@ -423,7 +423,9 @@ Come comunicare lo stato (usa questi messaggi, adattali con naturalezza):
 - status Shipped → "Il pacco risulta spedito da te, lo stiamo ricevendo a breve."
 - status Received → "Il reso è arrivato in magazzino, in fase di controllo qualità."
 - status Resolved → dipende da resolution: se contiene "rimborso" o "refund" → "Il rimborso è stato emesso sul metodo di pagamento originale. Accredito in genere 2-3 giorni lavorativi (dipende dalla banca)."; se contiene "cambio" o "negozio" → "Il cambio è stato elaborato. Puoi recarti in negozio con la tua autorizzazione."; altrimenti → "La pratica è stata chiusa. Se hai dubbi sull'esito scrivi al team."
-- status Rejected → "La richiesta non è stata accettata. Apro un ticket al team così ti spiegano il motivo. Procedo?"
+- status Rejected → se rejectionNote è presente usala per spiegare il motivo in modo professionale (es. "Il reso non è stato accettato: [motivo da rejectionNote]. Hai domande? Posso aprire un ticket al team."); altrimenti → "La richiesta non è stata accettata. Apro un ticket al team così ti spiegano il motivo. Procedo?"
+
+Note interne (staffNotes): se presente, usala come contesto per dare una risposta più precisa ma NON citarla verbatim — traducila in linguaggio cliente (es. se staffNotes dice "approved, sending discount code" → di' al cliente che il reso è stato approvato con rimborso sotto forma di codice sconto).
 
 Se il tool ritorna error: richreturns_not_configured → ignora il tool e usa i messaggi statici qui sotto.
 

@@ -20,6 +20,8 @@ export type RichReturn = {
   resolution: string;
   label?: { tracking: string; url: string };
   fees?: number;
+  staffNotes?: string;
+  rejectionNote?: string;
 };
 
 export async function getReturnByRMA(env: Env, rma: string): Promise<RichReturn | null> {
@@ -73,5 +75,11 @@ function mapRichReturn(raw: Record<string, unknown>): RichReturn {
     resolution: String(raw.resolutionType ?? raw.resolution ?? ''),
     label,
     fees: typeof raw.fees === 'number' ? raw.fees : undefined,
+    staffNotes: raw.staffNotes ?? raw.staff_notes ?? raw.internalNotes ?? raw.internal_notes
+      ? String(raw.staffNotes ?? raw.staff_notes ?? raw.internalNotes ?? raw.internal_notes)
+      : undefined,
+    rejectionNote: raw.rejectionObservation ?? raw.rejection_observation ?? raw.rejectionNote ?? raw.rejection_note
+      ? String(raw.rejectionObservation ?? raw.rejection_observation ?? raw.rejectionNote ?? raw.rejection_note)
+      : undefined,
   };
 }
