@@ -14,6 +14,7 @@ import {
   ShopifyNotInstalledError,
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
+import { getReturnByRMA } from '../clients/richreturnsClient';
 import { checkBarcodeAvailability } from '../clients/siacloudClient';
 import { SIACLOUD_STORES } from '../data/siacloudStoreCodes';
 import {
@@ -361,6 +362,15 @@ async function executeTool(
           search_keywords: keywords,
           visual_search_available: !!env.HF_SPACE_URL && !!env.PRODUCT_VECTORS,
         });
+      }
+      case 'get_return_status': {
+        const rma = String(input.rma_number ?? '').trim();
+        if (!env.RICHRETURNS_API_KEY) {
+          return JSON.stringify({ error: 'richreturns_not_configured' });
+        }
+        const ret = await getReturnByRMA(env, rma);
+        if (!ret) return JSON.stringify({ found: false, rma });
+        return JSON.stringify({ found: true, ...ret });
       }
       case 'open_support_ticket': {
         const category = String(input.category ?? 'altro');

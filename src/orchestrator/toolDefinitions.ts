@@ -137,6 +137,21 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
     },
   },
   {
+    name: 'get_return_status',
+    description:
+      "Recupera lo stato reale di una pratica di reso tramite RichReturns. Usalo quando il cliente chiede del suo reso e hai già recuperato l'ordine Shopify (numero ordine + email). Il campo rma_number dell'ordine contiene il numero RMA scritto automaticamente da Rich Returns nella nota Shopify. Se l'ordine non ha rma_number, il cliente non ha ancora compilato il modulo di reso online → manda il template reso.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        rma_number: {
+          type: 'string',
+          description: "Numero RMA estratto dalla nota ordine Shopify (es. RMA-434851103125). Lo trovi nel campo rma_number del risultato di get_order_by_number_and_email.",
+        },
+      },
+      required: ['rma_number'],
+    },
+  },
+  {
     name: 'open_support_ticket',
     description:
       "Apri un ticket di supporto al team umano. Usalo quando (a) il cliente lo chiede, (b) serve un'azione di scrittura su Shopify, (c) problema tecnico, (d) reclamo con toni legali. Ritorna conferma apertura ticket.",

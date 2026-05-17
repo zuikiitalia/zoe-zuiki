@@ -47,6 +47,10 @@ export interface OrderSummary {
   shipping_city?: string;
   shipping_country?: string;
   items?: Array<{ title: string; quantity: number; variant?: string | null }>;
+  // Nota dell'ordine Shopify. Rich Returns scrive automaticamente l'RMA qui (es. "RMA-434851103125").
+  note?: string;
+  // RMA estratto dalla nota tramite regex /RMA-\d+/ (es. "RMA-434851103125"), se presente.
+  rma_number?: string;
   // Tracking solo per consegne a domicilio. Per pickup è sempre vuoto.
   tracking?: Array<{ company?: string; number?: string; url?: string; status?: string }>;
   // === Logica consegna ===
@@ -169,7 +173,7 @@ export async function getOrderByNameAndEmail(
       orders(first: 1, query: $q) {
         edges {
           node {
-            id name email createdAt tags
+            id name email createdAt tags note
             displayFinancialStatus displayFulfillmentStatus
             totalPriceSet { shopMoney { amount currencyCode } }
             shippingAddress { city country }
@@ -197,6 +201,7 @@ export async function getOrderByNameAndEmail(
           email: string | null;
           createdAt: string;
           tags: string[];
+          note: string | null;
           displayFinancialStatus: string | null;
           displayFulfillmentStatus: string | null;
           totalPriceSet: { shopMoney: { amount: string; currencyCode: string } } | null;
@@ -327,6 +332,8 @@ export async function getOrderByNameAndEmail(
     status_history: statusHistory,
     latest_status: latestStatus,
     tags,
+    note: node.note ?? undefined,
+    rma_number: (node.note?.match(/RMA-\d+/)?.[0]) ?? undefined,
   };
 }
 
