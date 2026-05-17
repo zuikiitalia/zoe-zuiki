@@ -22,6 +22,8 @@ export type RichReturn = {
   fees?: number;
   staffNotes?: string;
   rejectionNote?: string;
+  // Campi raw aggiuntivi per gestire variazioni API non ancora mappate
+  _raw?: Record<string, unknown>;
 };
 
 export async function getReturnByRMA(env: Env, rma: string): Promise<RichReturn | null> {
@@ -41,6 +43,15 @@ export async function getReturnByRMA(env: Env, rma: string): Promise<RichReturn 
   }
 
   const data = await res.json() as Record<string, unknown>;
+  logger.info('richreturns_raw', {
+    keys: Object.keys(data),
+    status: data.status,
+    returnStatus: data.returnStatus,
+    state: data.state,
+    resolution: data.resolutionType ?? data.resolution,
+    rejection: data.rejectionObservation ?? data.rejection_observation ?? data.rejectionNote,
+    rmaNumber: data.rmaNumber ?? data.rma,
+  });
   return mapRichReturn(data);
 }
 
@@ -62,9 +73,21 @@ function mapRichReturn(raw: Record<string, unknown>): RichReturn {
     ? { tracking: String(labelRaw.trackingNumber), url: String(labelRaw.url ?? '') }
     : undefined;
 
+  // Estrai tutti i campi scalari non-PII dalla risposta raw per passarli a Claude
+  // nel caso la mappatura non copra tutti i campi dell'API RichReturns.
+  const rawScalars: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      // Escludi campi PII cliente
+      if (!['email', 'phone', 'name', 'firstName', 'lastName', 'address'].includes(k)) {
+        rawScalars[k] = v;
+      }
+    }
+  }
+
   return {
     rma: String(raw.rmaNumber ?? raw.rma ?? ''),
-    status: (raw.status ?? 'Pending') as RichReturn['status'],
+    status: (raw.status ?? raw.returnStatus ?? raw.currentStatus ?? raw.state ?? 'Pending') as RichReturn['status'],
     createdAt: String(raw.createdAt ?? raw.created_at ?? ''),
     customer: {
       email: String((raw.customer as Record<string, unknown> | undefined)?.email ?? raw.customerEmail ?? ''),
@@ -81,5 +104,6 @@ function mapRichReturn(raw: Record<string, unknown>): RichReturn {
     rejectionNote: raw.rejectionObservation ?? raw.rejection_observation ?? raw.rejectionNote ?? raw.rejection_note
       ? String(raw.rejectionObservation ?? raw.rejection_observation ?? raw.rejectionNote ?? raw.rejection_note)
       : undefined,
+    _raw: rawScalars,
   };
 }

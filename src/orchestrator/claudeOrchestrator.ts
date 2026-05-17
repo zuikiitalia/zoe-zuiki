@@ -176,8 +176,18 @@ async function executeTool(
           String(input.order_number ?? ''),
           String(input.email ?? '')
         );
+        logger.info('order_lookup_result', {
+          found: res.found,
+          note: (res as unknown as Record<string, unknown>).note ?? null,
+          rma_number: res.rma_number ?? null,
+          has_richreturns_key: !!env.RICHRETURNS_API_KEY,
+        }, phone);
         if (res.found && res.rma_number && env.RICHRETURNS_API_KEY) {
-          const returnData = await getReturnByRMA(env, res.rma_number).catch(() => null);
+          const returnData = await getReturnByRMA(env, res.rma_number).catch((e) => {
+            logger.error('richreturns_fetch_failed', { rma: res.rma_number, error: String(e) }, phone);
+            return null;
+          });
+          logger.info('richreturns_result', { rma: res.rma_number, found: !!returnData, status: returnData?.status ?? null }, phone);
           return JSON.stringify({ ...res, return_status: returnData ?? undefined });
         }
         return JSON.stringify(res);
