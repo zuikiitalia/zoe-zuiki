@@ -133,7 +133,14 @@ export async function isOurOutboundEcho(
   const raw = await kv.get<ZoeSentEntry[]>(key, 'json');
   const list = Array.isArray(raw) ? raw : [];
   const target = hashMessageText(text);
-  return list.some(e => e.hash === target);
+  if (list.some(e => e.hash === target)) return true;
+
+  // Se hash e ID non corrispondono ma ci sono invii recenti di Zoe (ultimi 90s),
+  // è probabile un falso negativo per KV eventual consistency (datacenter diversi).
+  // In quel caso trattiamo come echo per evitare falsi human_active.
+  // Preferiamo perdere un takeover umano rarissimo piuttosto che silenziare Zoe per 24h.
+  const recentThreshold = Date.now() - 90_000;
+  return list.some(e => e.ts > recentThreshold);
 }
 
 export async function markHumanActive(kv: KVNamespace, phone: string): Promise<void> {

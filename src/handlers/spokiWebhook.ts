@@ -201,6 +201,16 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         return;
       }
       const isAutomation = t === 'template' || t === 'whatsapp_campaign' || t === 'campaign';
+      // Log diagnostico: registra i dettagli per capire se è davvero un operatore umano
+      // o se c'è ancora un problema di echo detection.
+      if (!isAutomation) {
+        logger.info('outbound_human_candidate', {
+          spoki_type: out.spokiType,
+          spoki_id: out.spokiId ?? 'none',
+          chars: out.text.length,
+          text_preview: out.text.slice(0, 60),
+        }, out.phone);
+      }
       const now = Date.now();
       const outboundContent = isAutomation
         ? `[Notifica Zuiki]: ${out.text}`
