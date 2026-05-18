@@ -11,6 +11,7 @@ import {
   getOrderByNameAndEmail,
   searchProducts,
   getProductByHandle,
+  getProductByHandleEnriched,
   ShopifyNotInstalledError,
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
@@ -440,6 +441,112 @@ async function executeTool(
               }
               return base;
             };
+
+            // Path experimental con rerank ad alta confidence:
+            // committiamo sul winner anche se OOS — un cardigan in viscosa "disponibile"
+            // ma sbagliato è peggio di un traforato corretto ma esaurito.
+            // In più estraiamo varianti disponibili (altri colori/taglie dello stesso modello)
+            // e alternative simili in-stock dai top-K rerankati.
+            if (experimental && rerankResult && rerankResult.confidence >= 0.7 && topMatches.length > 0) {
+              const winner = topMatches[0]!;
+              try {
+                const detail = await getProductByHandleEnriched(env, winner.handle);
+                const totalInv = detail.total_inventory ?? 0;
+                const inStockVariants = (detail.variants ?? []).filter(v => v.available);
+
+                const colorKey = (opts: Record<string, string>) =>
+                  opts['Colore'] ?? opts['Color'] ?? opts['colore'] ?? '';
+                const sizeKey = (opts: Record<string, string>) =>
+                  opts['Taglia'] ?? opts['Size'] ?? opts['taglia'] ?? '';
+
+                const availableColors = Array.from(new Set(
+                  inStockVariants.map(v => colorKey(v.options)).filter(Boolean)
+                ));
+                // Raggruppa varianti disponibili per colore → { "Nero": ["S","M"], "Blu": ["L"] }
+                // così Claude può rispondere "c'è in Nero S, M e Blu L" senza ulteriore parsing.
+                const variantsByColor: Record<string, string[]> = {};
+                for (const v of inStockVariants) {
+                  const c = colorKey(v.options) || '(unico)';
+                  const s = sizeKey(v.options);
+                  if (!variantsByColor[c]) variantsByColor[c] = [];
+                  if (s && !variantsByColor[c].includes(s)) variantsByColor[c].push(s);
+                }
+                const availableVariants = inStockVariants.map(v => {
+                  const colore = colorKey(v.options);
+                  const taglia = sizeKey(v.options);
+                  return { color: colore, size: taglia, inventory: v.inventory };
+                });
+
+                // Alternative in-stock dai top-K rerankati (esclusi winner stesso e i suoi handle simili).
+                const similarAlternatives: Array<{ title: string; url: string; similarity_percent: number }> = [];
+                for (const m of topMatches.slice(1, 8)) {
+                  if (similarAlternatives.length >= 3) break;
+                  try {
+                    const d = await getProductByHandle(env, m.handle);
+                    if ((d.total_inventory ?? 0) > 0) {
+                      similarAlternatives.push({
+                        title: m.title,
+                        url: m.url,
+                        similarity_percent: similarityFor(m.similarity),
+                      });
+                    }
+                  } catch { /* skip */ }
+                }
+
+                matchResult = {
+                  sku: winner.sku,
+                  title: winner.title,
+                  url: winner.url,
+                  image_url: winner.image_url,
+                  category: getCategoryName(winner.sku_suffix),
+                  similarity_percent: similarityFor(winner.similarity),
+                };
+                const finalHandleEarly = winner.handle;
+
+                if (env.ZOE_DB && convId) {
+                  insertFashionClipSearch(env.ZOE_DB, convId, {
+                    source,
+                    suffix: suffix || undefined,
+                    candidatesJson: JSON.stringify(
+                      originalTopMatches.slice(0, 10).map(m => ({
+                        handle: m.handle,
+                        title: m.title.slice(0, 80),
+                        similarity: Math.round(m.similarity * 1000) / 1000,
+                      }))
+                    ),
+                    reranked: true,
+                    rerankWinner: rerankResult.best_handle,
+                    rerankConfidence: rerankResult.confidence,
+                    rerankReasoning: rerankResult.reasoning,
+                    finalHandle: finalHandleEarly,
+                    finalTitle: matchResult.title,
+                    foundButOos: totalInv === 0,
+                  }).catch(() => {});
+                }
+
+                return JSON.stringify({
+                  match: matchResult,
+                  winner_in_stock: totalInv > 0,
+                  available_colors: availableColors,
+                  variants_by_color: variantsByColor,
+                  available_variants: availableVariants.slice(0, 30),
+                  similar_alternatives: similarAlternatives.length > 0 ? similarAlternatives : undefined,
+                  found_but_all_oos: totalInv === 0,
+                  rerank_applied: true,
+                  rerank_confidence: Math.round(rerankResult.confidence * 100),
+                  search_url: searchUrl,
+                  search_keywords: keywords,
+                  visual_search_available: true,
+                  hint_for_zoe: 'Se winner_in_stock=true ma il colore richiesto manca da variants_by_color, dì che il modello c\'è ma non in quel colore, elenca i colori disponibili con le rispettive taglie da variants_by_color, e chiedi se vuole un altro colore o un modello simile (similar_alternatives). Se found_but_all_oos=true, dì che il modello è esaurito e proponi similar_alternatives.',
+                });
+              } catch (err) {
+                logger.warn('experimental_winner_detail_failed', {
+                  handle: winner.handle,
+                  error: err instanceof Error ? err.message : String(err),
+                }, phone);
+                // Fall through al path normale sotto.
+              }
+            }
 
             // Scegli il primo match con disponibilità > 0
             let finalHandle: string | null = null;
