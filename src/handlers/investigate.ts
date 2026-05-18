@@ -17,6 +17,8 @@ export async function handleMigrate(c: Context<{ Bindings: Env }>): Promise<Resp
     { name: 'tool_input_json', sql: 'ALTER TABLE tool_calls ADD COLUMN input_json TEXT' },
     { name: 'tool_output_json', sql: 'ALTER TABLE tool_calls ADD COLUMN output_json TEXT' },
     { name: 'tool_duration_ms', sql: 'ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER' },
+    { name: 'create_assistant_thoughts', sql: 'CREATE TABLE IF NOT EXISTS assistant_thoughts (id TEXT PRIMARY KEY, conv_id TEXT NOT NULL, ts INTEGER NOT NULL, iteration INTEGER, text TEXT NOT NULL)' },
+    { name: 'idx_thoughts_conv', sql: 'CREATE INDEX IF NOT EXISTS idx_thoughts_conv ON assistant_thoughts(conv_id, ts)' },
   ];
 
   for (const m of migrations) {
@@ -72,7 +74,7 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
     const firstTs = conv.first_ts as number;
     const lastTs = conv.last_ts as number;
 
-    const [msgs, tools, apis] = await Promise.all([
+    const [msgs, tools, apis, thoughts] = await Promise.all([
       db
         .prepare(
           'SELECT role, content, ts FROM messages WHERE phone_hash = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
@@ -88,6 +90,12 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
       db
         .prepare(
           'SELECT ts, model, input_tokens, output_tokens, cache_read_tokens, latency_ms, iteration, stop_reason, cost_usd FROM api_calls WHERE conv_id = ? ORDER BY ts ASC'
+        )
+        .bind(convId)
+        .all(),
+      db
+        .prepare(
+          'SELECT ts, iteration, text FROM assistant_thoughts WHERE conv_id = ? ORDER BY ts ASC'
         )
         .bind(convId)
         .all(),
@@ -112,6 +120,7 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
       messages: msgs.results ?? [],
       tool_calls: tools.results ?? [],
       api_calls: apis.results ?? [],
+      thoughts: thoughts.results ?? [],
     });
   }
 

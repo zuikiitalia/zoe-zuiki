@@ -96,6 +96,19 @@ export async function insertApiCall(db: D1Database, convId: string, call: ApiCal
   ).run();
 }
 
+export async function insertThought(
+  db: D1Database,
+  convId: string,
+  iteration: number,
+  text: string
+): Promise<void> {
+  const id = `${convId}_thought_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  await db
+    .prepare(`INSERT OR IGNORE INTO assistant_thoughts (id, conv_id, ts, iteration, text) VALUES (?,?,?,?,?)`)
+    .bind(id, convId, Date.now(), iteration, text.slice(0, 8000))
+    .run();
+}
+
 export async function insertToolCall(db: D1Database, convId: string, call: ToolCallData): Promise<void> {
   const id = `${convId}_${call.toolName}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   await db.prepare(`

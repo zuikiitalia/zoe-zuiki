@@ -255,7 +255,7 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
       const convId = conv.id as string;
       const firstTs = conv.first_ts as number;
       const lastTs = conv.last_ts as number;
-      const [msgs, tools, apis] = await Promise.all([
+      const [msgs, tools, apis, thoughts] = await Promise.all([
         c.env.ZOE_DB.prepare(
           'SELECT role, content, ts FROM messages WHERE phone_hash = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
         ).bind(ph, firstTs, lastTs + 120_000).all(),
@@ -265,12 +265,16 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
         c.env.ZOE_DB.prepare(
           'SELECT ts, model, input_tokens, output_tokens, cache_read_tokens, latency_ms, iteration, stop_reason, cost_usd FROM api_calls WHERE conv_id = ? ORDER BY ts ASC'
         ).bind(convId).all(),
+        c.env.ZOE_DB.prepare(
+          'SELECT ts, iteration, text FROM assistant_thoughts WHERE conv_id = ? ORDER BY ts ASC'
+        ).bind(convId).all(),
       ]);
       conversations.push({
         ...conv,
         messages: msgs.results ?? [],
         tool_calls: tools.results ?? [],
         api_calls: apis.results ?? [],
+        thoughts: thoughts.results ?? [],
       });
     }
     return c.json({ phone_hash: ph, conversations });
@@ -735,8 +739,9 @@ async function runInvestigate(){
 function renderInvConv(c){
   const events=[];
   (c.messages||[]).forEach(m=>events.push({ts:m.ts,type:'msg',role:m.role,content:m.content}));
-  (c.tool_calls||[]).forEach(t=>events.push({ts:t.ts,type:'tool',name:t.tool_name,success:!!t.success}));
+  (c.tool_calls||[]).forEach(t=>events.push({ts:t.ts,type:'tool',name:t.tool_name,success:!!t.success,input_json:t.input_json,output_json:t.output_json,duration_ms:t.duration_ms}));
   (c.api_calls||[]).forEach(a=>events.push({ts:a.ts,type:'api',...a}));
+  (c.thoughts||[]).forEach(th=>events.push({ts:th.ts,type:'thought',iteration:th.iteration,text:th.text}));
   events.sort((a,b)=>a.ts-b.ts);
   const timeline=events.map(e=>{
     const t=fmtTime(e.ts);
@@ -746,8 +751,15 @@ function renderInvConv(c){
       const bg=isUser?'#fff':'#dcfce7';
       const border=isUser?'#e5e7eb':'#bbf7d0';
       const align=isUser?'left':'right';
-      const text=(e.content||'').replace(/</g,'&lt;').replace(/\\n/g,'<br>');
-      return '<div style="margin:8px 0;text-align:'+align+'"><div style="display:inline-block;max-width:80%;background:'+bg+';border:1px solid '+border+';border-radius:8px;padding:8px 12px;text-align:left"><div style="font-size:11px;color:#64748b;font-weight:600">'+who+' · '+t+'</div><div style="font-size:13px;margin-top:3px">'+text+'</div></div></div>';
+      const raw=e.content||'';
+      const long=raw.length>240;
+      const escFull=raw.replace(/</g,'&lt;').replace(/\\n/g,'<br>');
+      const escShort=raw.slice(0,240).replace(/</g,'&lt;').replace(/\\n/g,'<br>')+'…';
+      const mid='m-'+Math.random().toString(36).slice(2,9);
+      const body=long
+        ? '<div id="'+mid+'-s" style="font-size:13px;margin-top:3px">'+escShort+' <a href="#" onclick="document.getElementById(\\''+mid+'-s\\').style.display=\\'none\\';document.getElementById(\\''+mid+'-f\\').style.display=\\'block\\';return false" style="color:#4f46e5;font-size:11px">[espandi]</a></div><div id="'+mid+'-f" style="display:none;font-size:13px;margin-top:3px">'+escFull+' <a href="#" onclick="document.getElementById(\\''+mid+'-f\\').style.display=\\'none\\';document.getElementById(\\''+mid+'-s\\').style.display=\\'block\\';return false" style="color:#4f46e5;font-size:11px">[riduci]</a></div>'
+        : '<div style="font-size:13px;margin-top:3px">'+escFull+'</div>';
+      return '<div style="margin:8px 0;text-align:'+align+'"><div style="display:inline-block;max-width:80%;background:'+bg+';border:1px solid '+border+';border-radius:8px;padding:8px 12px;text-align:left"><div style="font-size:11px;color:#64748b;font-weight:600">'+who+' · '+t+'</div>'+body+'</div></div>';
     }
     if(e.type==='tool'){
       const icon=TOOL_ICONS[e.name]||'🔧';
@@ -765,6 +777,14 @@ function renderInvConv(c){
       const expander=hasDetails?'<a href="#" onclick="document.getElementById(\\''+detailId+'\\').style.display=document.getElementById(\\''+detailId+'\\').style.display===\\'block\\'?\\'none\\':\\'block\\';return false" style="color:#4f46e5;font-size:11px;margin-left:8px">[dettagli]</a>':'';
       const details=hasDetails?'<div id="'+detailId+'" style="display:none;margin:4px 0 4px 24px;padding:8px 10px;background:#1e293b;color:#e2e8f0;border-radius:6px;font-size:11px;font-family:monospace;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow:auto"><div style="color:#94a3b8;margin-bottom:4px">INPUT:</div>'+(e.input_json||'(nessuno)').replace(/</g,'&lt;')+'<div style="color:#94a3b8;margin:8px 0 4px">OUTPUT:</div>'+(e.output_json||'(nessuno)').replace(/</g,'&lt;')+'</div>':'';
       return '<div style="font-size:12px;color:#475569;padding:2px 0;font-family:monospace">  ['+t+'] '+icon+' '+status+' <b>'+e.name+'</b>'+inputSummary+dur+expander+'</div>'+details;
+    }
+    if(e.type==='thought'){
+      const tid='th-'+Math.random().toString(36).slice(2,9);
+      const preview=(e.text||'').slice(0,80).replace(/</g,'&lt;').replace(/\\n/g,' ');
+      const full=(e.text||'').replace(/</g,'&lt;').replace(/\\n/g,'<br>');
+      const more=(e.text||'').length>80?' …':'';
+      return '<div style="font-size:12px;color:#7c3aed;padding:3px 0;font-family:monospace">  ['+t+'] 💭 <i>'+preview+more+'</i> <a href="#" onclick="document.getElementById(\\''+tid+'\\').style.display=document.getElementById(\\''+tid+'\\').style.display===\\'block\\'?\\'none\\':\\'block\\';return false" style="color:#4f46e5;font-size:11px">[mostra]</a></div>'+
+        '<div id="'+tid+'" style="display:none;margin:4px 0 4px 24px;padding:10px 12px;background:#f5f3ff;border-left:3px solid #7c3aed;border-radius:4px;font-size:13px;color:#4c1d95;font-family:inherit;line-height:1.4">'+full+'</div>';
     }
     const cost=e.cost_usd!=null?'$'+Number(e.cost_usd).toFixed(4):'';
     return '<div style="font-size:11px;color:#94a3b8;padding:1px 0;font-family:monospace">  ['+t+'] 🧠 iter='+e.iteration+' in='+e.input_tokens+' out='+e.output_tokens+' cache='+e.cache_read_tokens+' '+e.latency_ms+'ms '+e.stop_reason+' '+cost+'</div>';

@@ -29,7 +29,7 @@ import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
 import { markHumanActive } from '../storage/kvStore';
 import { getCategoryName } from '../data/skuSuffixes';
-import { insertApiCall, insertToolCall, upsertConversation } from '../analytics/db';
+import { insertApiCall, insertToolCall, insertThought, upsertConversation } from '../analytics/db';
 import type { ApiCallData } from '../analytics/db';
 
 const STORES_CDN_URL = 'https://cdn.shopify.com/s/files/1/0624/0642/6862/files/stores.json?v=1774869600';
@@ -825,6 +825,15 @@ export async function processMessage(
         break;
       }
       messages.push({ role: 'assistant', content: response.content });
+      // Cattura il "pensiero" di Claude (text block emesso insieme alle tool_use)
+      // per poter ricostruire il ragionamento nella tab investigazione.
+      if (env.ZOE_DB && convId) {
+        for (const block of response.content) {
+          if (block.type === 'text' && block.text.trim()) {
+            insertThought(env.ZOE_DB, convId, iterations, block.text).catch(() => {});
+          }
+        }
+      }
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const block of response.content) {
         if (block.type === 'tool_use') {
