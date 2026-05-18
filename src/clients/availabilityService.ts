@@ -31,10 +31,12 @@ export interface AvailabilityResult {
   error?: string;
 }
 
-function matchOption(value: string, query: string): boolean {
-  const v = value.toLowerCase();
+function matchOption(value: string, query: string, exact = false): boolean {
+  const v = value.toLowerCase().trim();
   const q = query.toLowerCase().trim();
-  return v === q || v.includes(q) || q.includes(v);
+  if (v === q) return true;
+  if (exact) return false;
+  return v.includes(q) || q.includes(v);
 }
 
 export async function checkAvailability(
@@ -58,12 +60,18 @@ export async function checkAvailability(
 
   let candidates = product.variants;
 
-  // Filter by color
+  // Filter by color (exact match preferred, fallback a substring)
   if (color) {
-    const colorMatches = candidates.filter((v) => {
+    let colorMatches = candidates.filter((v) => {
       const varColor = v.options['Colore'] ?? v.options['Color'] ?? '';
-      return matchOption(varColor, color);
+      return matchOption(varColor, color, true);
     });
+    if (colorMatches.length === 0) {
+      colorMatches = candidates.filter((v) => {
+        const varColor = v.options['Colore'] ?? v.options['Color'] ?? '';
+        return matchOption(varColor, color);
+      });
+    }
     if (colorMatches.length === 0) {
       return {
         found: true,
@@ -78,11 +86,11 @@ export async function checkAvailability(
     candidates = colorMatches;
   }
 
-  // Filter by size
+  // Filter by size (exact match only — "S" non deve mai matchare "XS")
   if (size) {
     const sizeMatches = candidates.filter((v) => {
       const varSize = v.options['Taglia'] ?? v.options['Size'] ?? '';
-      return matchOption(varSize, size);
+      return matchOption(varSize, size, true);
     });
     if (sizeMatches.length === 0) {
       return {
