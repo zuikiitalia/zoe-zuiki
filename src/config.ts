@@ -18,6 +18,8 @@ export interface Env {
   ZOE_DB?: D1Database;
   // Password per accedere alla dashboard (Bearer token).
   DASHBOARD_SECRET?: string;
+  // Chiave segreta per l'endpoint /api/investigate (debug conversazioni).
+  INVESTIGATE_KEY?: string;
   // RichReturns API key — se non configurata, Zoe usa il comportamento statico per i resi.
   RICHRETURNS_API_KEY?: string;
 }

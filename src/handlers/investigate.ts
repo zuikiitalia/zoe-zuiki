@@ -1,0 +1,81 @@
+import type { Context } from 'hono';
+import type { Env } from '../config';
+import { phoneHash } from '../analytics/db';
+
+export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<Response> {
+  const key = c.req.header('x-investigate-key');
+  if (!c.env.INVESTIGATE_KEY || key !== c.env.INVESTIGATE_KEY) {
+    return c.json({ error: 'unauthorized' }, 401);
+  }
+
+  if (!c.env.ZOE_DB) {
+    return c.json({ error: 'db_not_configured' }, 503);
+  }
+
+  const phoneParam = c.req.query('phone') ?? '';
+  const limitParam = parseInt(c.req.query('limit') ?? '3', 10);
+  if (!phoneParam) {
+    return c.json({ error: 'missing phone param' }, 400);
+  }
+
+  const ph = await phoneHash(phoneParam);
+  const db = c.env.ZOE_DB;
+
+  const convs = await db
+    .prepare(
+      'SELECT * FROM conversations WHERE phone_hash = ? ORDER BY first_ts DESC LIMIT ?'
+    )
+    .bind(ph, Math.min(limitParam, 20))
+    .all();
+
+  const conversations = [];
+  for (const conv of convs.results ?? []) {
+    const convId = conv.id as string;
+    const firstTs = conv.first_ts as number;
+    const lastTs = conv.last_ts as number;
+
+    const [msgs, tools, apis] = await Promise.all([
+      db
+        .prepare(
+          'SELECT role, content, ts FROM messages WHERE phone_hash = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
+        )
+        .bind(ph, firstTs, lastTs + 120_000)
+        .all(),
+      db
+        .prepare(
+          'SELECT ts, tool_name, success FROM tool_calls WHERE conv_id = ? ORDER BY ts ASC'
+        )
+        .bind(convId)
+        .all(),
+      db
+        .prepare(
+          'SELECT ts, model, input_tokens, output_tokens, cache_read_tokens, latency_ms, iteration, stop_reason, cost_usd FROM api_calls WHERE conv_id = ? ORDER BY ts ASC'
+        )
+        .bind(convId)
+        .all(),
+    ]);
+
+    conversations.push({
+      id: convId,
+      first_ts: firstTs,
+      last_ts: lastTs,
+      user_turns: conv.user_turns,
+      assistant_turns: conv.assistant_turns,
+      total_cost_usd: conv.total_cost_usd,
+      total_input_tokens: conv.total_input_tokens,
+      total_output_tokens: conv.total_output_tokens,
+      total_cache_read_tokens: conv.total_cache_read_tokens,
+      ticket_id: conv.ticket_id,
+      ticket_category: conv.ticket_category,
+      ticket_reason: conv.ticket_reason,
+      ticket_urgency: conv.ticket_urgency,
+      sentiment: conv.sentiment,
+      sentiment_note: conv.sentiment_note,
+      messages: msgs.results ?? [],
+      tool_calls: tools.results ?? [],
+      api_calls: apis.results ?? [],
+    });
+  }
+
+  return c.json({ phone_hash: ph, conversations });
+}
