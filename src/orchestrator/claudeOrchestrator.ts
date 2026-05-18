@@ -406,6 +406,13 @@ async function executeTool(
 
             // Experimental: Claude Sonnet 4.6 vision re-rank sui top candidati.
             let rerankResult: RerankResult | null = null;
+            logger.info('rerank_gate', {
+              experimental,
+              has_user_image: !!userImage,
+              user_image_dim: userImage ? userImage.base64.length : 0,
+              candidates: topMatches.length,
+              will_call: experimental && !!userImage && topMatches.length > 1,
+            }, phone);
             if (experimental && userImage && topMatches.length > 1) {
               rerankResult = await rerankCandidates(
                 env,

@@ -76,7 +76,7 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
     const firstTs = conv.first_ts as number;
     const lastTs = conv.last_ts as number;
 
-    const [msgs, tools, apis, thoughts] = await Promise.all([
+    const [msgs, tools, apis, thoughts, fashionSearches] = await Promise.all([
       db
         .prepare(
           'SELECT role, content, ts FROM messages WHERE phone_hash = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
@@ -98,6 +98,12 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
       db
         .prepare(
           'SELECT ts, iteration, text FROM assistant_thoughts WHERE conv_id = ? ORDER BY ts ASC'
+        )
+        .bind(convId)
+        .all(),
+      db
+        .prepare(
+          'SELECT ts, source, suffix, reranked, rerank_winner, rerank_confidence, rerank_reasoning, final_handle, final_title, found_but_oos, candidates_json FROM fashion_clip_searches WHERE conv_id = ? ORDER BY ts ASC'
         )
         .bind(convId)
         .all(),
@@ -123,6 +129,7 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
       tool_calls: tools.results ?? [],
       api_calls: apis.results ?? [],
       thoughts: thoughts.results ?? [],
+      fashion_searches: fashionSearches.results ?? [],
     });
   }
 
