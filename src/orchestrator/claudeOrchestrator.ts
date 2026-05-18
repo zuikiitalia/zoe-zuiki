@@ -423,6 +423,17 @@ async function executeTool(
               }
             }
 
+            // Quando il re-rank Sonnet ha confermato/scelto un match con alta confidence,
+            // la similarity di Vectorize sottostima la qualità reale (FashionCLIP ignora la texture).
+            // Usiamo max(vectorize, rerank_confidence*100) per evitare hedging inutile di Claude.
+            const similarityFor = (vectorSim: number): number => {
+              const base = Math.round(vectorSim * 100);
+              if (rerankResult && rerankResult.confidence >= 0.7) {
+                return Math.max(base, Math.round(rerankResult.confidence * 100));
+              }
+              return base;
+            };
+
             // Scegli il primo match con disponibilità > 0
             let finalHandle: string | null = null;
             for (const match of topMatches) {
@@ -442,7 +453,7 @@ async function executeTool(
                   url: match.url,
                   image_url: match.image_url,
                   category: getCategoryName(match.sku_suffix),
-                  similarity_percent: Math.round(match.similarity * 100),
+                  similarity_percent: similarityFor(match.similarity),
                 };
                 break;
               } catch {
@@ -453,7 +464,7 @@ async function executeTool(
                   url: match.url,
                   image_url: match.image_url,
                   category: getCategoryName(match.sku_suffix),
-                  similarity_percent: Math.round(match.similarity * 100),
+                  similarity_percent: similarityFor(match.similarity),
                 };
                 break;
               }
