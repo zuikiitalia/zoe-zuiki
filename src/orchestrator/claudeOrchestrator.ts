@@ -24,6 +24,7 @@ import {
 } from '../clients/vectorizeClient';
 import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
+import { markHumanActive } from '../storage/kvStore';
 import { getCategoryName } from '../data/skuSuffixes';
 import { insertApiCall, insertToolCall, upsertConversation } from '../analytics/db';
 import type { ApiCallData } from '../analytics/db';
@@ -456,6 +457,12 @@ async function executeTool(
             phone
           );
           // Non blocchiamo Zoe: il log sopra è già un ticket utilizzabile dal team.
+        }
+
+        // Silenzia Zoe: dopo aver aperto il ticket, un operatore umano gestirà la chat.
+        // Questo previene duplicazione ticket e risposte indesiderate a "ok"/"grazie".
+        if (env.ZOE_KV) {
+          await markHumanActive(env.ZOE_KV, phone).catch(() => {});
         }
 
         return JSON.stringify({
