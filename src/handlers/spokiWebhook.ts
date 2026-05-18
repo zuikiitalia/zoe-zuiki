@@ -484,6 +484,7 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         await upsertConversation(env.ZOE_DB, {
           convId,
           phoneHash: pHash,
+          phoneFull: normalizePhone(phone),
           firstTs,
           lastTs: now,
           userTurns,

@@ -4,7 +4,7 @@ import { handleSpokiWebhook } from './handlers/spokiWebhook';
 import { handleShopifyInstall } from './handlers/shopifyInstall';
 import { handleShopifyCallback } from './handlers/shopifyCallback';
 import { handleDashboardHTML, handleDashboardAPI } from './handlers/dashboard';
-import { handleInvestigate } from './handlers/investigate';
+import { handleInvestigate, handleMigrate } from './handlers/investigate';
 import { runDailyReview } from './analytics/dailyReview';
 import { logger } from './utils/logger';
 
@@ -18,6 +18,7 @@ app.get('/dashboard', handleDashboardHTML);
 app.get('/dashboard/api/*', handleDashboardAPI);
 app.post('/dashboard/api/*', handleDashboardAPI);
 app.get('/api/investigate', handleInvestigate);
+app.post('/api/migrate', handleMigrate);
 
 app.notFound((c) => c.json({ error: 'not_found' }, 404));
 

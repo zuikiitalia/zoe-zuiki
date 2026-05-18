@@ -33,6 +33,7 @@ export interface ToolCallData {
 export interface ConversationUpdate {
   convId: string;
   phoneHash: string;
+  phoneFull?: string | null;
   firstTs: number;
   lastTs: number;
   userTurns: number;
@@ -50,10 +51,10 @@ export interface ConversationUpdate {
 export async function upsertConversation(db: D1Database, data: ConversationUpdate): Promise<void> {
   await db.prepare(`
     INSERT INTO conversations
-      (id, phone_hash, first_ts, last_ts, user_turns, assistant_turns,
+      (id, phone_hash, phone_full, first_ts, last_ts, user_turns, assistant_turns,
        total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cost_usd,
        ticket_id, ticket_category, ticket_reason, ticket_urgency, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
       last_ts = excluded.last_ts,
       user_turns = excluded.user_turns,
@@ -62,13 +63,14 @@ export async function upsertConversation(db: D1Database, data: ConversationUpdat
       total_output_tokens = excluded.total_output_tokens,
       total_cache_read_tokens = excluded.total_cache_read_tokens,
       total_cost_usd = excluded.total_cost_usd,
+      phone_full = COALESCE(excluded.phone_full, conversations.phone_full),
       ticket_id = COALESCE(excluded.ticket_id, conversations.ticket_id),
       ticket_category = COALESCE(excluded.ticket_category, conversations.ticket_category),
       ticket_reason = COALESCE(excluded.ticket_reason, conversations.ticket_reason),
       ticket_urgency = COALESCE(excluded.ticket_urgency, conversations.ticket_urgency),
       updated_at = excluded.updated_at
   `).bind(
-    data.convId, data.phoneHash, data.firstTs, data.lastTs,
+    data.convId, data.phoneHash, data.phoneFull ?? null, data.firstTs, data.lastTs,
     data.userTurns, data.assistantTurns,
     data.totalInputTokens, data.totalOutputTokens, data.totalCacheReadTokens, data.totalCostUsd,
     data.ticketId ?? null, data.ticketCategory ?? null, data.ticketReason ?? null, data.ticketUrgency ?? null,

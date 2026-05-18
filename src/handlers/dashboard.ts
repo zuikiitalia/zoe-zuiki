@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import type { Env } from '../config';
+import { phoneHash } from '../analytics/db';
 
 // Helper per verificare auth
 function checkAuth(c: Context<{ Bindings: Env }>): boolean {
@@ -98,6 +99,7 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     const rows = await c.env.ZOE_DB.prepare(`
       SELECT
         phone_hash,
+        (SELECT phone_full FROM conversations c3 WHERE c3.phone_hash=conversations.phone_hash AND c3.phone_full IS NOT NULL ORDER BY c3.last_ts DESC LIMIT 1) AS phone_full,
         COUNT(*) AS sessions,
         SUM(user_turns) AS total_user_turns,
         SUM(assistant_turns) AS total_assistant_turns,
@@ -212,6 +214,42 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
       `).all(),
     ]);
     return c.json({ findings: findings.results, summary: summary.results });
+  }
+
+  // GET /dashboard/api/investigate?phone=... — lookup full trace per numero
+  if (path === '/investigate') {
+    const phoneParam = url.searchParams.get('phone') ?? '';
+    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '3', 10), 20);
+    if (!phoneParam) return c.json({ error: 'missing phone' }, 400);
+    const ph = await phoneHash(phoneParam.replace(/\D/g, ''));
+    const convs = await c.env.ZOE_DB
+      .prepare('SELECT * FROM conversations WHERE phone_hash = ? ORDER BY first_ts DESC LIMIT ?')
+      .bind(ph, limit)
+      .all();
+    const conversations = [];
+    for (const conv of convs.results ?? []) {
+      const convId = conv.id as string;
+      const firstTs = conv.first_ts as number;
+      const lastTs = conv.last_ts as number;
+      const [msgs, tools, apis] = await Promise.all([
+        c.env.ZOE_DB.prepare(
+          'SELECT role, content, ts FROM messages WHERE phone_hash = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
+        ).bind(ph, firstTs, lastTs + 120_000).all(),
+        c.env.ZOE_DB.prepare(
+          'SELECT ts, tool_name, success FROM tool_calls WHERE conv_id = ? ORDER BY ts ASC'
+        ).bind(convId).all(),
+        c.env.ZOE_DB.prepare(
+          'SELECT ts, model, input_tokens, output_tokens, cache_read_tokens, latency_ms, iteration, stop_reason, cost_usd FROM api_calls WHERE conv_id = ? ORDER BY ts ASC'
+        ).bind(convId).all(),
+      ]);
+      conversations.push({
+        ...conv,
+        messages: msgs.results ?? [],
+        tool_calls: tools.results ?? [],
+        api_calls: apis.results ?? [],
+      });
+    }
+    return c.json({ phone_hash: ph, conversations });
   }
 
   // POST /dashboard/api/run-review — trigger manuale (utile per test)
@@ -339,6 +377,20 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
       <div class="panel"><h3>Token per modello</h3><div class="chart-wrap"><canvas id="ch-tokens"></canvas></div></div>
       <div class="panel"><h3>Tool più usati</h3><div class="chart-wrap"><canvas id="ch-tools"></canvas></div></div>
     </div>
+    <div class="panel" id="investigate-panel">
+      <h3>🔬 Indaga conversazione per numero</h3>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+        <input type="text" id="inv-phone" placeholder="es. 3334443334 o +393334443334" style="flex:1;min-width:220px;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:.9rem"/>
+        <select id="inv-limit" style="padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:.9rem">
+          <option value="1">Ultima</option>
+          <option value="3" selected>Ultime 3</option>
+          <option value="10">Ultime 10</option>
+          <option value="20">Ultime 20</option>
+        </select>
+        <button onclick="runInvestigate()" style="padding:8px 18px;background:#4f46e5;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600">Cerca</button>
+      </div>
+      <div id="inv-result"></div>
+    </div>
     <div class="panel" id="findings-panel">
       <h3>🔎 Review qualità (ultimi 30 giorni) <button id="run-review-btn" onclick="runReview()" style="float:right;font-size:12px">Esegui ora</button></h3>
       <div id="findings-summary" style="margin-bottom:12px"></div>
@@ -354,7 +406,7 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
       <div id="conv-spinner" class="spinner">Caricamento…</div>
       <table id="conv-table" style="display:none">
         <thead><tr>
-          <th>Cliente</th><th>Prima/Ultima</th><th>Sessioni</th><th>Turni tot.</th><th>Ticket</th><th>Sentiment ultimo</th>
+          <th>Telefono</th><th>Prima/Ultima</th><th>Sessioni</th><th>Turni tot.</th><th>Ticket</th><th>Sentiment ultimo</th>
         </tr></thead>
         <tbody id="conv-tbody"></tbody>
       </table>
@@ -550,7 +602,7 @@ function renderConvTable(d){
   convTotal=d.total||0;
   const tbody=document.getElementById('conv-tbody');
   tbody.innerHTML=rows.map(r=>\`<tr class="conv-row" onclick="openConv('\${r.latest_conv_id}')">
-    <td style="font-family:monospace;font-size:12px">\${(r.phone_hash||'').slice(0,12)}…</td>
+    <td style="font-family:monospace;font-size:12px">\${r.phone_full ? '+'+r.phone_full : (r.phone_hash||'').slice(0,12)+'…'}</td>
     <td>\${fmt(r.first_seen)}<br><span style="color:#94a3b8;font-size:11px">\${fmt(r.last_seen)}</span></td>
     <td>\${r.sessions||0}</td>
     <td>\${r.total_user_turns||0}u / \${r.total_assistant_turns||0}a</td>
@@ -606,7 +658,7 @@ async function openConv(id){
 
   document.getElementById('modal-content').innerHTML=\`
     <dl class="meta-grid">
-      <dt>Cliente (hash)</dt><dd style="font-family:monospace">\${c.phone_hash}</dd>
+      <dt>Cliente</dt><dd style="font-family:monospace">\${c.phone_full ? '+'+c.phone_full : ''} <span style="color:#94a3b8;font-size:11px">\${c.phone_hash}</span></dd>
       <dt>Sessione corrente</dt><dd>\${fmt(c.first_ts)} → \${fmt(c.last_ts)}</dd>
       <dt>Tutte le sessioni</dt><dd>\${sessions.length} con questo cliente</dd>
       <dt>Sentiment ultimo</dt><dd><span class="badge badge-\${c.sentiment||'unknown'}">\${c.sentiment||'?'}</span> \${c.sentiment_note||''}</dd>
@@ -639,8 +691,62 @@ async function openConv(id){
   \`;
 }
 
+const TOOL_ICONS={search_products:'🔍',get_product_by_handle:'📦',check_availability:'🏬',check_store_availability:'🏪',find_similar_product:'✨',get_order_by_name_and_email:'🧾',open_support_ticket:'🎫',get_return_by_rma:'↩️',search_stores:'🗺️',get_store_details:'📍'};
+
+function fmtTime(ts){return new Date(ts).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit',second:'2-digit'});}
+
+async function runInvestigate(){
+  const phone=document.getElementById('inv-phone').value.trim();
+  const limit=document.getElementById('inv-limit').value;
+  const res=document.getElementById('inv-result');
+  if(!phone){res.innerHTML='<p style="color:#ef4444">Inserisci un numero.</p>';return;}
+  res.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/investigate?phone='+encodeURIComponent(phone)+'&limit='+limit);
+  if(!data){res.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+  const convs=data.conversations||[];
+  if(!convs.length){res.innerHTML='<p style="color:#94a3b8">Nessuna conversazione trovata per questo numero. (hash provato: '+data.phone_hash+')<br>Prova con/senza prefisso 39.</p>';return;}
+  res.innerHTML=convs.map(c=>renderInvConv(c)).join('');
+}
+
+function renderInvConv(c){
+  const events=[];
+  (c.messages||[]).forEach(m=>events.push({ts:m.ts,type:'msg',role:m.role,content:m.content}));
+  (c.tool_calls||[]).forEach(t=>events.push({ts:t.ts,type:'tool',name:t.tool_name,success:!!t.success}));
+  (c.api_calls||[]).forEach(a=>events.push({ts:a.ts,type:'api',...a}));
+  events.sort((a,b)=>a.ts-b.ts);
+  const timeline=events.map(e=>{
+    const t=fmtTime(e.ts);
+    if(e.type==='msg'){
+      const isUser=e.role==='user';
+      const who=isUser?'👤 Cliente':'🤖 Zoe';
+      const bg=isUser?'#fff':'#dcfce7';
+      const border=isUser?'#e5e7eb':'#bbf7d0';
+      const align=isUser?'left':'right';
+      const text=(e.content||'').replace(/</g,'&lt;').replace(/\\n/g,'<br>');
+      return '<div style="margin:8px 0;text-align:'+align+'"><div style="display:inline-block;max-width:80%;background:'+bg+';border:1px solid '+border+';border-radius:8px;padding:8px 12px;text-align:left"><div style="font-size:11px;color:#64748b;font-weight:600">'+who+' · '+t+'</div><div style="font-size:13px;margin-top:3px">'+text+'</div></div></div>';
+    }
+    if(e.type==='tool'){
+      const icon=TOOL_ICONS[e.name]||'🔧';
+      const status=e.success?'<span style="color:#10b981">✓</span>':'<span style="color:#ef4444">✗</span>';
+      return '<div style="font-size:12px;color:#475569;padding:2px 0;font-family:monospace">  ['+t+'] '+icon+' '+status+' '+e.name+'</div>';
+    }
+    const cost=e.cost_usd!=null?'$'+Number(e.cost_usd).toFixed(4):'';
+    return '<div style="font-size:11px;color:#94a3b8;padding:1px 0;font-family:monospace">  ['+t+'] 🧠 iter='+e.iteration+' in='+e.input_tokens+' out='+e.output_tokens+' cache='+e.cache_read_tokens+' '+e.latency_ms+'ms '+e.stop_reason+' '+cost+'</div>';
+  }).join('');
+  const meta='<div style="font-weight:700;font-size:.9rem;color:#1a1a2e;margin-bottom:6px">'+fmt(c.first_ts)+' → '+fmt(c.last_ts)+'</div>'+
+    '<div style="font-size:.8rem;color:#6b7280;margin-bottom:10px">'+
+    (c.user_turns||0)+'u / '+(c.assistant_turns||0)+'a · '+
+    (c.total_cost_usd?fmtCost(c.total_cost_usd):'$0')+' · '+
+    (c.ticket_id?'<span class="badge badge-ticket">'+c.ticket_id+' '+(c.ticket_category||'')+'</span>':'no ticket')+' · '+
+    '<span class="badge badge-'+(c.sentiment||'unknown')+'">'+(c.sentiment||'?')+'</span>'+
+    '</div>';
+  return '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:14px;background:#f8fafc">'+meta+timeline+'</div>';
+}
+
 function closeModal(){document.getElementById('conv-modal').classList.remove('open');}
 document.getElementById('conv-modal').addEventListener('click',e=>{if(e.target===document.getElementById('conv-modal'))closeModal();});
+
+document.getElementById('inv-phone').addEventListener('keydown',e=>{if(e.key==='Enter')runInvestigate();});
 
 // Auto-login da sessionStorage
 const saved=sessionStorage.getItem('dash_secret');

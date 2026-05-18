@@ -2,11 +2,34 @@ import type { Context } from 'hono';
 import type { Env } from '../config';
 import { phoneHash } from '../analytics/db';
 
-export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<Response> {
+function checkKey(c: Context<{ Bindings: Env }>): boolean {
   const key = c.req.header('x-investigate-key');
-  if (!c.env.INVESTIGATE_KEY || key !== c.env.INVESTIGATE_KEY) {
-    return c.json({ error: 'unauthorized' }, 401);
+  return !!c.env.INVESTIGATE_KEY && key === c.env.INVESTIGATE_KEY;
+}
+
+export async function handleMigrate(c: Context<{ Bindings: Env }>): Promise<Response> {
+  if (!checkKey(c)) return c.json({ error: 'unauthorized' }, 401);
+  if (!c.env.ZOE_DB) return c.json({ error: 'db_not_configured' }, 503);
+
+  const results: Record<string, string> = {};
+  const migrations: Array<{ name: string; sql: string }> = [
+    { name: 'add_phone_full', sql: 'ALTER TABLE conversations ADD COLUMN phone_full TEXT' },
+  ];
+
+  for (const m of migrations) {
+    try {
+      await c.env.ZOE_DB.prepare(m.sql).run();
+      results[m.name] = 'applied';
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      results[m.name] = msg.includes('duplicate column') ? 'already_applied' : `error: ${msg}`;
+    }
   }
+  return c.json({ migrations: results });
+}
+
+export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<Response> {
+  if (!checkKey(c)) return c.json({ error: 'unauthorized' }, 401);
 
   if (!c.env.ZOE_DB) {
     return c.json({ error: 'db_not_configured' }, 503);

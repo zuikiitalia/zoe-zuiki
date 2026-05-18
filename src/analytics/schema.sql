@@ -4,6 +4,7 @@
 CREATE TABLE IF NOT EXISTS conversations (
   id TEXT PRIMARY KEY,                    -- hash(phone)_firstTs
   phone_hash TEXT NOT NULL,
+  phone_full TEXT,                        -- numero in chiaro (normalizzato). Visibile solo da dashboard.
   first_ts INTEGER NOT NULL,
   last_ts INTEGER NOT NULL,
   message_count INTEGER DEFAULT 0,
