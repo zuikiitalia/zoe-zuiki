@@ -382,13 +382,52 @@ async function executeTool(
           }
 
           if (embedding) {
-            const topK = (beta || experimental) ? 10 : 5;
-            const topMatches = await findSimilarProducts(
+            const topK = experimental ? 15 : ((beta) ? 10 : 5);
+            let topMatches = await findSimilarProducts(
               env,
               embedding,
               suffix || undefined,
               topK
             );
+
+            // Experimental: amplia il pool di candidati con una text-search Shopify
+            // sulla visual_description. FashionCLIP a volte non indicizza/ranka bene
+            // prodotti che invece sono ovvi per ricerca testuale.
+            if (experimental && visualDescription) {
+              try {
+                const qWords = visualDescription
+                  .split(/\s+/)
+                  .filter(w => w.length > 3)
+                  .slice(0, 5)
+                  .join(' ');
+                if (qWords) {
+                  const textRes = await searchProducts(env, qWords);
+                  const seenHandles = new Set(topMatches.map(m => m.handle));
+                  for (const p of textRes.products.slice(0, 10)) {
+                    if (seenHandles.has(p.handle)) continue;
+                    seenHandles.add(p.handle);
+                    topMatches.push({
+                      handle: p.handle,
+                      title: p.title,
+                      sku: '',
+                      sku_suffix: suffix || '',
+                      url: p.url ?? `https://www.zuiki.it/products/${p.handle}`,
+                      image_url: p.image ?? '',
+                      similarity: 0.5,
+                    });
+                  }
+                  logger.info('text_search_merge', {
+                    query: qWords,
+                    added: topMatches.length - topK,
+                    total: topMatches.length,
+                  }, phone);
+                }
+              } catch (e) {
+                logger.warn('text_search_merge_failed', { error: e instanceof Error ? e.message : String(e) }, phone);
+              }
+            }
+            // Limit finale a 25 per non esplodere il costo Sonnet (max 25 immagini).
+            topMatches = topMatches.slice(0, 25);
             logger.info('fashion_clip_search', {
               source,
               suffix: suffix || 'any',
@@ -477,17 +516,28 @@ async function executeTool(
                   return { color: colore, size: taglia, inventory: v.inventory };
                 });
 
-                // Alternative in-stock dai top-K rerankati (esclusi winner stesso e i suoi handle simili).
-                const similarAlternatives: Array<{ title: string; url: string; similarity_percent: number }> = [];
-                for (const m of topMatches.slice(1, 8)) {
+                // Alternative scelte da Sonnet (rerankResult.alternatives), filtrate per in-stock.
+                // Le alternative di Sonnet sono già ordinate per similarità visiva al photo,
+                // quindi non rischiamo più di proporre una viscosa quando il cliente vuole un traforato.
+                const similarAlternatives: Array<{ title: string; url: string; similarity_percent: number; reasoning?: string }> = [];
+                const altCandidates = rerankResult.alternatives.length > 0
+                  ? rerankResult.alternatives
+                      .map(a => {
+                        const m = topMatches.find(tm => tm.handle === a.handle);
+                        return m ? { match: m, sonnetSimilarity: a.similarity, sonnetReasoning: a.reasoning } : null;
+                      })
+                      .filter((x): x is NonNullable<typeof x> => x !== null)
+                  : topMatches.slice(1, 8).map(m => ({ match: m, sonnetSimilarity: m.similarity, sonnetReasoning: '' }));
+                for (const cand of altCandidates) {
                   if (similarAlternatives.length >= 3) break;
                   try {
-                    const d = await getProductByHandle(env, m.handle);
+                    const d = await getProductByHandle(env, cand.match.handle);
                     if ((d.total_inventory ?? 0) > 0) {
                       similarAlternatives.push({
-                        title: m.title,
-                        url: m.url,
-                        similarity_percent: similarityFor(m.similarity),
+                        title: cand.match.title,
+                        url: cand.match.url,
+                        similarity_percent: Math.round(cand.sonnetSimilarity * 100),
+                        reasoning: cand.sonnetReasoning || undefined,
                       });
                     }
                   } catch { /* skip */ }
