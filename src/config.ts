@@ -10,6 +10,7 @@ export interface Env {
   TEAM_EMAIL: string;
   WHATSAPP_NUMBER: string;
   ALLOWLIST_PHONES?: string;
+  BETA_PHONES?: string;
   HF_SPACE_URL?: string;
   AI?: Ai;
   PRODUCT_VECTORS?: VectorizeIndex;

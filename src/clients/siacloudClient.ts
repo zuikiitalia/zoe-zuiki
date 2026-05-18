@@ -24,6 +24,7 @@ export interface BarcodeAvailability {
   found: boolean;
   barcode: string;
   total: number;
+  ecom_qty: number;
   stores: StoreStock[];
 }
 
@@ -46,7 +47,7 @@ export async function checkBarcodeAvailability(barcode: string): Promise<Barcode
     });
     if (!res.ok) {
       logger.warn('siacloud_inventory_http_error', { status: res.status, barcode });
-      return { found: false, barcode, total: 0, stores: [] };
+      return { found: false, barcode, total: 0, ecom_qty: 0, stores: [] };
     }
     json = (await res.json()) as SiacloudResponse;
   } catch (err) {
@@ -54,19 +55,20 @@ export async function checkBarcodeAvailability(barcode: string): Promise<Barcode
       error: err instanceof Error ? err.message : String(err),
       barcode,
     });
-    return { found: false, barcode, total: 0, stores: [] };
+    return { found: false, barcode, total: 0, ecom_qty: 0, stores: [] };
   }
 
   if (json.status !== 'OK' || !json.data || !json.data[barcode]) {
     logger.info('siacloud_inventory_empty', { barcode, status: json.status });
-    return { found: false, barcode, total: 0, stores: [] };
+    return { found: false, barcode, total: 0, ecom_qty: 0, stores: [] };
   }
 
   const entry = json.data[barcode];
+  let ecomQty = 0;
   const stores: StoreStock[] = [];
   for (const [code, qty] of Object.entries(entry.stores)) {
+    if (code === 'ECOM') { ecomQty = Math.max(0, qty); continue; }
     if (qty <= 0) continue;
-    if (code === 'ECOM') continue;
     const meta = getSiacloudStore(code);
     stores.push({
       code,
@@ -82,6 +84,7 @@ export async function checkBarcodeAvailability(barcode: string): Promise<Barcode
     found: true,
     barcode,
     total: entry.total,
+    ecom_qty: ecomQty,
     stores,
   };
 }

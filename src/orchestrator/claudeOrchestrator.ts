@@ -5,8 +5,8 @@ import {
   CLAUDE_MAX_TOKENS,
   MAX_TOOL_ITERATIONS,
 } from '../config';
-import { SYSTEM_PROMPT } from '../prompts/systemPrompt';
-import { TOOL_DEFINITIONS } from './toolDefinitions';
+import { SYSTEM_PROMPT, SYSTEM_PROMPT_BETA } from '../prompts/systemPrompt';
+import { TOOL_DEFINITIONS, TOOL_DEFINITIONS_BETA } from './toolDefinitions';
 import {
   getOrderByNameAndEmail,
   searchProducts,
@@ -16,6 +16,9 @@ import {
 import { createSpokiTicket } from '../clients/spokiClient';
 import { getReturnByRMA } from '../clients/richreturnsClient';
 import { checkBarcodeAvailability } from '../clients/siacloudClient';
+import { checkAvailability } from '../clients/availabilityService';
+import { isBetaPhone } from '../utils/phone';
+import { searchProductsBeta } from '../clients/shopifyClient';
 import { SIACLOUD_STORES } from '../data/siacloudStoreCodes';
 import {
   computeImageEmbeddingFashionCLIP,
@@ -24,6 +27,7 @@ import {
 } from '../clients/vectorizeClient';
 import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
+import { markHumanActive } from '../storage/kvStore';
 import { getCategoryName } from '../data/skuSuffixes';
 import { insertApiCall, insertToolCall, upsertConversation } from '../analytics/db';
 import type { ApiCallData } from '../analytics/db';
@@ -166,7 +170,8 @@ async function executeTool(
   name: string,
   input: Record<string, unknown>,
   clipEmbedding?: number[] | null,
-  convId?: string
+  convId?: string,
+  beta = false
 ): Promise<string> {
   try {
     switch (name) {
@@ -193,8 +198,49 @@ async function executeTool(
         return JSON.stringify(res);
       }
       case 'search_products': {
+        if (beta) {
+          const res = await searchProductsBeta(env, String(input.query ?? ''), {
+            color: (input.color as string | undefined),
+            size: (input.size as string | undefined),
+            product_type: (input.product_type as string | undefined),
+            tag: (input.tag as string | undefined),
+          });
+          logger.info('search_products_beta', {
+            query: input.query,
+            color: input.color,
+            size: input.size,
+            product_type: input.product_type,
+            results: res.products.length,
+          }, phone);
+          return JSON.stringify(res);
+        }
         const res = await searchProducts(env, String(input.query ?? ''));
         return JSON.stringify(res);
+      }
+      case 'check_availability': {
+        if (!beta) return JSON.stringify({ error: 'not_available' });
+        const handleOrSku = String(input.handle_or_sku ?? '').trim();
+        if (!handleOrSku) return JSON.stringify({ error: 'missing_handle_or_sku' });
+        const result = await checkAvailability(
+          env,
+          handleOrSku,
+          (input.size as string | undefined)?.trim(),
+          (input.color as string | undefined)?.trim(),
+          (input.location as string | undefined)?.trim()
+        );
+        logger.info('check_availability', {
+          handle_or_sku: handleOrSku,
+          color: input.color,
+          size: input.size,
+          location: input.location,
+          found: result.found,
+          needs_clarification: result.needs_clarification,
+          variant_options: result.variant?.options,
+          total_nationwide: result.total_nationwide,
+          stores_count: result.stores?.length ?? 0,
+          ecom_qty: result.ecom_qty,
+        }, phone);
+        return JSON.stringify(result);
       }
       case 'get_product_by_handle': {
         const res = await getProductByHandle(env, String(input.handle ?? ''));
@@ -331,11 +377,12 @@ async function executeTool(
           }
 
           if (embedding) {
+            const topK = beta ? 10 : 5;
             const topMatches = await findSimilarProducts(
               env,
               embedding,
               suffix || undefined,
-              5
+              topK
             );
             logger.info('fashion_clip_search', {
               source,
@@ -370,7 +417,6 @@ async function executeTool(
                 };
                 break;
               } catch {
-                // Se Shopify non risponde, usa il match senza check
                 matchResult = {
                   sku: match.sku,
                   title: match.title,
@@ -381,6 +427,26 @@ async function executeTool(
                 };
                 break;
               }
+            }
+
+            // Beta I4: se nessun match disponibile, ritorna comunque il top-1 con flag
+            if (beta && !matchResult && topMatches.length > 0) {
+              const top = topMatches[0]!;
+              matchResult = {
+                sku: top.sku,
+                title: top.title,
+                url: top.url,
+                image_url: top.image_url,
+                category: getCategoryName(top.sku_suffix),
+                similarity_percent: Math.round(top.similarity * 100),
+              };
+              return JSON.stringify({
+                match: matchResult,
+                found_but_all_oos: true,
+                search_url: searchUrl,
+                search_keywords: keywords,
+                visual_search_available: true,
+              });
             }
           }
         }
@@ -456,6 +522,12 @@ async function executeTool(
             phone
           );
           // Non blocchiamo Zoe: il log sopra è già un ticket utilizzabile dal team.
+        }
+
+        // Silenzia Zoe: dopo aver aperto il ticket, un operatore umano gestirà la chat.
+        // Questo previene duplicazione ticket e risposte indesiderate a "ok"/"grazie".
+        if (env.ZOE_KV) {
+          await markHumanActive(env.ZOE_KV, phone).catch(() => {});
         }
 
         return JSON.stringify({
@@ -631,6 +703,7 @@ export async function processMessage(
   humanActive = false
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+  const beta = isBetaPhone(phone, env.BETA_PHONES);
 
   // Scarica immagini una sola volta (per Claude content e FashionCLIP embedding).
   const downloadedImages = images.length > 0 ? await downloadImages(images, phone) : [];
@@ -654,13 +727,10 @@ export async function processMessage(
     { role: 'user' as const, content: firstUserContent },
   ];
 
-  // Prompt caching Anthropic: il system prompt è statico e lungo (~3.5k token).
-  // Passandolo come block con cache_control:ephemeral, gli input_tokens successivi
-  // entro 5 minuti usano il cache (~90% sconto sui token di prompt).
   const systemBlocks: Anthropic.TextBlockParam[] = [
     {
       type: 'text',
-      text: SYSTEM_PROMPT,
+      text: beta ? SYSTEM_PROMPT_BETA : SYSTEM_PROMPT,
       cache_control: { type: 'ephemeral' },
     },
   ];
@@ -687,7 +757,7 @@ export async function processMessage(
           model: CLAUDE_MODEL,
           max_tokens: CLAUDE_MAX_TOKENS,
           system: systemBlocks,
-          tools: TOOL_DEFINITIONS,
+          tools: beta ? TOOL_DEFINITIONS_BETA : TOOL_DEFINITIONS,
           messages,
         },
         { signal: AbortSignal.timeout(25_000) }
@@ -763,7 +833,7 @@ export async function processMessage(
             { tool: block.name, input: block.input },
             phone
           );
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId);
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId, beta);
           // Traccia tool call nel DB analytics.
           if (env.ZOE_DB && convId) {
             insertToolCall(env.ZOE_DB, convId, { toolName: block.name, success: true }).catch(() => {});

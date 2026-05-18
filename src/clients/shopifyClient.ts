@@ -510,3 +510,250 @@ export async function getProductByHandle(env: Env, handle: string): Promise<Prod
     })),
   };
 }
+
+// ─── BETA: tipi e funzioni arricchite ────────────────────────────────────────
+
+export interface VariantEnriched {
+  title: string;
+  sku: string;
+  barcode: string | null;
+  available: boolean;
+  inventory: number | null;
+  inventory_policy: string;
+  price: string;
+  options: Record<string, string>;
+}
+
+export interface ProductDetailEnriched {
+  found: boolean;
+  title?: string;
+  handle?: string;
+  url?: string | null;
+  description?: string;
+  total_inventory?: number | null;
+  product_type?: string;
+  vendor?: string;
+  tags?: string[];
+  price_range?: {
+    minVariantPrice: { amount: string; currencyCode: string };
+    maxVariantPrice: { amount: string; currencyCode: string };
+  } | null;
+  options_available?: Record<string, string[]>;
+  variants?: VariantEnriched[];
+}
+
+export async function getProductByHandleEnriched(env: Env, handle: string): Promise<ProductDetailEnriched> {
+  const query = `
+    query GetProductEnriched($handle: String!) {
+      productByHandle(handle: $handle) {
+        title handle onlineStoreUrl description totalInventory status
+        productType vendor tags
+        priceRangeV2 {
+          minVariantPrice { amount currencyCode }
+          maxVariantPrice { amount currencyCode }
+        }
+        options { name values }
+        variants(first: 100) {
+          edges { node {
+            title sku barcode availableForSale inventoryQuantity price
+            inventoryPolicy
+            selectedOptions { name value }
+          }}
+        }
+      }
+    }`;
+
+  type VariantNode = {
+    title: string; sku: string; barcode: string | null;
+    availableForSale: boolean; inventoryQuantity: number | null;
+    price: string; inventoryPolicy: string;
+    selectedOptions: Array<{ name: string; value: string }>;
+  };
+  type PNode = {
+    title: string; handle: string; onlineStoreUrl: string | null;
+    description: string; totalInventory: number | null; status: string;
+    productType: string; vendor: string; tags: string[];
+    priceRangeV2: ProductDetailEnriched['price_range'];
+    options: Array<{ name: string; values: string[] }>;
+    variants: { edges: Array<{ node: VariantNode }> };
+  };
+  type Resp = { productByHandle: PNode | null };
+
+  const data = await shopifyGraphQL<Resp>(env, query, { handle });
+  let p = data.productByHandle;
+  if (p && p.status !== 'ACTIVE') p = null;
+
+  if (!p) {
+    const skuUpper = handle.toUpperCase();
+    const skuQuery = `
+      query SearchBySkuEnriched($q: String!) {
+        products(first: 1, query: $q) {
+          edges { node {
+            title handle onlineStoreUrl description totalInventory
+            productType vendor tags
+            priceRangeV2 {
+              minVariantPrice { amount currencyCode }
+              maxVariantPrice { amount currencyCode }
+            }
+            options { name values }
+            variants(first: 100) {
+              edges { node {
+                title sku barcode availableForSale inventoryQuantity price
+                inventoryPolicy
+                selectedOptions { name value }
+              }}
+            }
+          }}
+        }
+      }`;
+    type SkuResp = { products: { edges: Array<{ node: PNode | null }> } };
+    const skuData = await shopifyGraphQL<SkuResp>(env, skuQuery, { q: `sku:${skuUpper} status:active` });
+    p = skuData.products.edges[0]?.node ?? null;
+  }
+
+  if (!p) return { found: false };
+
+  const optionsAvailable: Record<string, string[]> = {};
+  for (const opt of p.options) optionsAvailable[opt.name] = opt.values;
+
+  return {
+    found: true,
+    title: p.title,
+    handle: p.handle,
+    url: p.onlineStoreUrl,
+    description: p.description,
+    total_inventory: p.totalInventory,
+    product_type: p.productType,
+    vendor: p.vendor,
+    tags: p.tags,
+    price_range: p.priceRangeV2,
+    options_available: optionsAvailable,
+    variants: p.variants.edges.map((e) => ({
+      title: e.node.title,
+      sku: e.node.sku,
+      barcode: e.node.barcode,
+      available: e.node.availableForSale,
+      inventory: e.node.inventoryQuantity,
+      inventory_policy: e.node.inventoryPolicy,
+      price: e.node.price,
+      options: Object.fromEntries(e.node.selectedOptions.map((o) => [o.name, o.value])),
+    })),
+  };
+}
+
+export interface ProductSearchItemBeta {
+  title: string;
+  handle: string;
+  url: string | null;
+  product_type: string;
+  image: string | null;
+  price_min: string;
+  options_available: Record<string, string[]>;
+  variants: Array<{
+    sku: string;
+    barcode: string | null;
+    available: boolean;
+    inventory: number | null;
+    price: string;
+    options: Record<string, string>;
+  }>;
+}
+
+export interface ProductSearchResultBeta {
+  products: ProductSearchItemBeta[];
+}
+
+export async function searchProductsBeta(
+  env: Env,
+  query: string,
+  opts: { color?: string; size?: string; product_type?: string; tag?: string; limit?: number } = {}
+): Promise<ProductSearchResultBeta> {
+  const { color, size, product_type, tag, limit = 5 } = opts;
+
+  const parts: string[] = [];
+  if (query.trim()) parts.push(query.trim());
+  if (product_type) parts.push(`product_type:"${product_type}"`);
+  if (tag) parts.push(`tag:${tag}`);
+  const qStr = parts.join(' ');
+  const activeQ = qStr.includes('status:') ? qStr : `${qStr} status:active`.trim();
+
+  const gql = `
+    query SearchProductsBeta($q: String!, $first: Int!) {
+      products(first: $first, query: $q) {
+        edges { node {
+          title handle onlineStoreUrl productType
+          featuredImage { url }
+          priceRangeV2 { minVariantPrice { amount currencyCode } }
+          options { name values }
+          variants(first: 100) {
+            edges { node {
+              sku barcode availableForSale inventoryQuantity price
+              selectedOptions { name value }
+            }}
+          }
+        }}
+      }
+    }`;
+
+  type VNode = {
+    sku: string; barcode: string | null;
+    availableForSale: boolean; inventoryQuantity: number | null; price: string;
+    selectedOptions: Array<{ name: string; value: string }>;
+  };
+  type Resp = {
+    products: { edges: Array<{ node: {
+      title: string; handle: string; onlineStoreUrl: string | null; productType: string;
+      featuredImage: { url: string } | null;
+      priceRangeV2: { minVariantPrice: { amount: string; currencyCode: string } } | null;
+      options: Array<{ name: string; values: string[] }>;
+      variants: { edges: Array<{ node: VNode }> };
+    }}> };
+  };
+
+  const data = await shopifyGraphQL<Resp>(env, gql, { q: activeQ, first: 100 });
+
+  let items: ProductSearchItemBeta[] = data.products.edges.map((e) => {
+    const n = e.node;
+    const optionsAvailable: Record<string, string[]> = {};
+    for (const opt of n.options) optionsAvailable[opt.name] = opt.values;
+    return {
+      title: n.title,
+      handle: n.handle,
+      url: n.onlineStoreUrl,
+      product_type: n.productType,
+      image: n.featuredImage?.url ?? null,
+      price_min: n.priceRangeV2?.minVariantPrice.amount ?? '',
+      options_available: optionsAvailable,
+      variants: n.variants.edges.map((ve) => ({
+        sku: ve.node.sku,
+        barcode: ve.node.barcode,
+        available: ve.node.availableForSale,
+        inventory: ve.node.inventoryQuantity,
+        price: ve.node.price,
+        options: Object.fromEntries(ve.node.selectedOptions.map((o) => [o.name, o.value])),
+      })),
+    };
+  });
+
+  if (color) {
+    const colorLower = color.toLowerCase().trim();
+    items = items.filter((item) =>
+      (item.options_available['Colore'] ?? item.options_available['Color'] ?? [])
+        .some((c) => c.toLowerCase().includes(colorLower))
+    );
+  }
+
+  if (size) {
+    const sizeLower = size.toLowerCase().trim();
+    items = items.filter((item) =>
+      item.variants.some(
+        (v) =>
+          v.available &&
+          ((v.options['Taglia'] ?? v.options['Size'] ?? '').toLowerCase() === sizeLower ||
+           (v.options['Taglia'] ?? v.options['Size'] ?? '').toLowerCase().includes(sizeLower))
+      )
+    );
+  }
+
+  return { products: items.slice(0, limit) };
+}

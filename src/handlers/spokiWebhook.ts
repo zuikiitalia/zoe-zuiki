@@ -3,6 +3,7 @@ import type { Env } from '../config';
 import { INTER_MESSAGE_DELAY_MS, MAX_CLAUDE_HISTORY_MESSAGES } from '../config';
 import { verifySpokiWebhook } from '../utils/security';
 import { logger } from '../utils/logger';
+import { normalizePhone } from '../utils/phone';
 import {
   loadConversation,
   saveConversation,
@@ -164,10 +165,6 @@ function extractOutbound(payload: unknown): OutboundMessage | null {
   const sender = (data.sender ?? {}) as Record<string, unknown>;
   const isService = typeof sender.is_service === 'boolean' ? sender.is_service : null;
   return { phone: String(phoneRaw), text, contentType, spokiType, spokiId, isService };
-}
-
-function normalizePhone(p: string): string {
-  return p.replace(/\D/g, '');
 }
 
 // Estrae phone e tag name dal payload contact_tag.created / contact_tag.deleted.
