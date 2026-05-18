@@ -231,3 +231,80 @@ Se non identificabile con certezza, lascia vuoto per cercare su tutto il catalog
     },
   },
 ];
+
+// ─── BETA ────────────────────────────────────────────────────────────────────
+// Sostituisce: search_products (aggiunti filtri color/size/product_type)
+//              check_store_availability → check_availability (1 call unificata)
+
+const BETA_SEARCH_PRODUCTS: Anthropic.Tool = {
+  name: 'search_products',
+  description:
+    "Cerca prodotti nel catalogo Zuiki per nome, colore o categoria. " +
+    "Parametri opzionali: color (es. 'rosso', 'blu navy') filtra sui dati strutturati del catalogo — non più sul titolo; " +
+    "size (es. 'S', 'M', 'L/XL') restringe ai prodotti con quella taglia disponibile; " +
+    "product_type (es. 'T-Shirt', 'Leggings', 'Costume', 'Gonna', 'Body', 'Pareo', 'Top', 'Abito') — passalo SEMPRE quando noto dalla conversazione. " +
+    "Se trovi 0 risultati anche con questi filtri, proponi il fallback URL zuiki.it/search?q=...",
+  input_schema: {
+    type: 'object',
+    properties: {
+      query: {
+        type: 'string',
+        description: "Termine testuale (nome, SKU, parola chiave). Puoi lasciarlo vuoto se usi color+product_type.",
+      },
+      color: {
+        type: 'string',
+        description: "Colore richiesto dal cliente (es. 'rosso', 'verde militare', 'panna'). Filtra sui dati strutturati delle varianti — non sul titolo. Usa sempre quando il cliente specifica un colore.",
+      },
+      size: {
+        type: 'string',
+        description: "Taglia richiesta (es. 'S', 'M', 'XL', '38', 'L/XL'). Filtra solo prodotti con quella taglia effettivamente disponibile.",
+      },
+      product_type: {
+        type: 'string',
+        description: "Categoria Shopify esatta (es. 'T-Shirt', 'Leggings', 'Costume', 'Gonna', 'Body', 'Pareo', 'Top', 'Abito', 'Canotta', 'Infradito'). Usala per restringere la ricerca quando la categoria è nota.",
+      },
+    },
+    required: [],
+  },
+};
+
+const BETA_CHECK_AVAILABILITY: Anthropic.Tool = {
+  name: 'check_availability',
+  description:
+    "Tool unificato per disponibilità prodotto (online + negozi fisici). " +
+    "Usalo DIRETTAMENTE con tutti i parametri noti, senza chiamare prima get_product_by_handle. " +
+    "Trigger obbligatorio: cliente cita ARTICOLO + (opzionale) TAGLIA/COLORE + (opzionale) NEGOZIO/CITTÀ. " +
+    "Gestisce internamente: ricerca prodotto, match variante per taglia+colore, check Siacloud. " +
+    "Se il colore/taglia è ambiguo, ritorna needs_clarification:true con le opzioni disponibili — mostra la lista al cliente e chiedi. " +
+    "Ritorna: variant.options (taglia+colore esatti), ecom_qty (stock online), stores (negozi con scorta, già filtrati per location).",
+  input_schema: {
+    type: 'object',
+    properties: {
+      handle_or_sku: {
+        type: 'string',
+        description: "SKU o handle del prodotto (es. 'Z9001FE', 'ls171rg-bikini-top-push-up-fasciante'). Usa lo SKU se disponibile.",
+      },
+      color: {
+        type: 'string',
+        description: "Colore richiesto dal cliente (anche approssimativo: 'rosso', 'magenta', 'blu scuro'). Il sistema fa match case-insensitive.",
+      },
+      size: {
+        type: 'string',
+        description: "Taglia richiesta (es. 'S', 'M', 'XL', '38').",
+      },
+      location: {
+        type: 'string',
+        description: "Città, regione o nome negozio dove il cliente vuole trovare il prodotto (es. 'Napoli', 'Campania', 'Vulcano Buono', 'Porte Franche'). Il sistema filtra i negozi per province, regione e nome.",
+      },
+    },
+    required: ['handle_or_sku'],
+  },
+};
+
+export const TOOL_DEFINITIONS_BETA: Anthropic.Tool[] = [
+  ...TOOL_DEFINITIONS.filter(
+    (t) => t.name !== 'search_products' && t.name !== 'check_store_availability'
+  ),
+  BETA_SEARCH_PRODUCTS,
+  BETA_CHECK_AVAILABILITY,
+];
