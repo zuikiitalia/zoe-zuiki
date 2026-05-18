@@ -20,6 +20,8 @@ export interface Env {
   DASHBOARD_SECRET?: string;
   // Chiave segreta per l'endpoint /api/investigate (debug conversazioni).
   INVESTIGATE_KEY?: string;
+  // Numeri abilitati alle feature sperimentali (comma-separated, es. "3920057593,393920057593").
+  EXPERIMENTAL_PHONES?: string;
   // RichReturns API key — se non configurata, Zoe usa il comportamento statico per i resi.
   RICHRETURNS_API_KEY?: string;
 }

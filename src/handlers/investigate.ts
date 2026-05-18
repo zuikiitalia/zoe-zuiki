@@ -19,6 +19,8 @@ export async function handleMigrate(c: Context<{ Bindings: Env }>): Promise<Resp
     { name: 'tool_duration_ms', sql: 'ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER' },
     { name: 'create_assistant_thoughts', sql: 'CREATE TABLE IF NOT EXISTS assistant_thoughts (id TEXT PRIMARY KEY, conv_id TEXT NOT NULL, ts INTEGER NOT NULL, iteration INTEGER, text TEXT NOT NULL)' },
     { name: 'idx_thoughts_conv', sql: 'CREATE INDEX IF NOT EXISTS idx_thoughts_conv ON assistant_thoughts(conv_id, ts)' },
+    { name: 'create_fashion_clip_searches', sql: 'CREATE TABLE IF NOT EXISTS fashion_clip_searches (id TEXT PRIMARY KEY, conv_id TEXT NOT NULL, ts INTEGER NOT NULL, source TEXT, suffix TEXT, candidates_json TEXT, reranked INTEGER DEFAULT 0, rerank_winner TEXT, rerank_confidence REAL, rerank_reasoning TEXT, final_handle TEXT, final_title TEXT, found_but_oos INTEGER DEFAULT 0)' },
+    { name: 'idx_fcs_conv', sql: 'CREATE INDEX IF NOT EXISTS idx_fcs_conv ON fashion_clip_searches(conv_id, ts)' },
   ];
 
   for (const m of migrations) {

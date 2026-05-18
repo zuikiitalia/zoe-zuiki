@@ -280,6 +280,20 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     return c.json({ phone_hash: ph, conversations });
   }
 
+  // GET /dashboard/api/image-searches?from=&to=&limit= — ricerche immagini sperimentali
+  if (path === '/image-searches') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 200);
+    const rows = await c.env.ZOE_DB.prepare(`
+      SELECT f.id, f.conv_id, f.ts, f.source, f.suffix, f.candidates_json,
+             f.reranked, f.rerank_winner, f.rerank_confidence, f.rerank_reasoning,
+             f.final_handle, f.final_title, f.found_but_oos
+      FROM fashion_clip_searches f
+      WHERE f.ts >= ? AND f.ts <= ?
+      ORDER BY f.ts DESC LIMIT ?
+    `).bind(fromMs, toMs, limit).all();
+    return c.json({ searches: rows.results ?? [] });
+  }
+
   // POST /dashboard/api/run-review — trigger manuale (utile per test)
   if (path === '/run-review') {
     if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: 'no_anthropic_key' }, 503);
@@ -418,6 +432,10 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
         <button onclick="runInvestigate()" style="padding:8px 18px;background:#4f46e5;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600">Cerca</button>
       </div>
       <div id="inv-result"></div>
+    </div>
+    <div class="panel" id="imgsearch-panel">
+      <h3>🔍 Ricerche immagini sperimentali <button onclick="loadImageSearches()" style="float:right;font-size:12px;padding:4px 10px;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer">Aggiorna</button></h3>
+      <div id="imgsearch-result"><p style="color:#94a3b8;font-size:.84rem">Clicca "Aggiorna" per caricare.</p></div>
     </div>
     <div class="panel" id="findings-panel">
       <h3>🔎 Review qualità (ultimi 30 giorni) <button id="run-review-btn" onclick="runReview()" style="float:right;font-size:12px">Esegui ora</button></h3>
@@ -803,6 +821,40 @@ function closeModal(){document.getElementById('conv-modal').classList.remove('op
 document.getElementById('conv-modal').addEventListener('click',e=>{if(e.target===document.getElementById('conv-modal'))closeModal();});
 
 document.getElementById('inv-phone').addEventListener('keydown',e=>{if(e.key==='Enter')runInvestigate();});
+
+async function loadImageSearches(){
+  const {from,to}=getFilters();
+  const el=document.getElementById('imgsearch-result');
+  el.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/image-searches?from='+from+'&to='+to+'&limit=50');
+  if(!data){el.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+  const rows=data.searches||[];
+  if(!rows.length){el.innerHTML='<p style="color:#94a3b8;font-size:.84rem">Nessuna ricerca immagine nel periodo selezionato.</p>';return;}
+  el.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:.79rem"><thead><tr style="background:#f9fafb"><th style="padding:6px 8px;text-align:left;color:#6b7280">Ora</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Sorgente</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Top-1 Vectorize</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Re-rank</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Risultato finale</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Conv</th></tr></thead><tbody>'+
+  rows.map(r=>{
+    let candidates=[];
+    try{candidates=JSON.parse(r.candidates_json||'[]');}catch{}
+    const top1=candidates[0]||{};
+    const rerankBadge=r.reranked
+      ?'<span style="background:#d1fae5;color:#065f46;padding:2px 7px;border-radius:4px;font-size:11px">✓ '+Math.round((r.rerank_confidence||0)*100)+'%</span>'
+      :'<span style="color:#94a3b8;font-size:11px">—</span>';
+    const rerankChanged=r.reranked&&r.rerank_winner&&r.rerank_winner!==top1.handle;
+    const rerankNote=rerankChanged?'<br><span style="color:#f59e0b;font-size:10px">⚡ cambiato da '+top1.handle+'</span>':'';
+    const oosBadge=r.found_but_oos?'<span style="background:#fee2e2;color:#991b1b;padding:2px 7px;border-radius:4px;font-size:11px;margin-left:4px">OOS</span>':'';
+    const detId='fcs-'+Math.random().toString(36).slice(2,8);
+    const candidateList=candidates.slice(0,5).map((c,i)=>'<div style="font-size:10px;color:#64748b">'+(i+1)+'. '+c.handle+' ('+Math.round((c.similarity||0)*100)+'%)</div>').join('');
+    return '<tr style="border-bottom:1px solid #f3f4f6">'+
+      '<td style="padding:5px 8px;font-size:11px;color:#64748b">'+fmtTime(r.ts)+'</td>'+
+      '<td style="padding:5px 8px"><span style="background:#ede9fe;color:#4f46e5;padding:2px 6px;border-radius:4px;font-size:11px">'+(r.source||'?')+(r.suffix?' ('+r.suffix+')':'')+'</span></td>'+
+      '<td style="padding:5px 8px"><span style="font-size:12px">'+top1.handle+'</span><span style="color:#94a3b8;font-size:10px;margin-left:4px">'+(top1.similarity?Math.round(top1.similarity*100)+'%':'')+'</span>'+
+        '<a href="#" onclick="document.getElementById(\''+detId+'\').style.display=document.getElementById(\''+detId+'\').style.display===\'block\'?\'none\':\'block\';return false" style="color:#4f46e5;font-size:10px;margin-left:6px">[tutti]</a>'+
+        '<div id="'+detId+'" style="display:none">'+candidateList+'</div></td>'+
+      '<td style="padding:5px 8px">'+rerankBadge+(r.rerank_reasoning?'<br><span style="font-size:10px;color:#475569">'+r.rerank_reasoning.slice(0,80).replace(/</g,'&lt;')+'</span>':'')+'</td>'+
+      '<td style="padding:5px 8px"><span style="font-size:12px">'+(r.final_handle||'—')+'</span>'+rerankNote+oosBadge+'<br><span style="font-size:10px;color:#94a3b8">'+(r.final_title||'').slice(0,40).replace(/</g,'&lt;')+'</span></td>'+
+      '<td style="padding:5px 8px"><a href="#" onclick="openConv(\''+r.conv_id+'\');return false" style="color:#4f46e5;font-size:11px">apri</a></td>'+
+    '</tr>';
+  }).join('')+'</tbody></table>';
+}
 
 // Auto-login da sessionStorage
 const saved=sessionStorage.getItem('dash_secret');

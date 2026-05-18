@@ -159,6 +159,41 @@ export async function loadFullHistory(
   }));
 }
 
+export interface FashionClipSearchData {
+  source: string;
+  suffix?: string;
+  candidatesJson: string;
+  reranked: boolean;
+  rerankWinner?: string;
+  rerankConfidence?: number;
+  rerankReasoning?: string;
+  finalHandle?: string;
+  finalTitle?: string;
+  foundButOos: boolean;
+}
+
+export async function insertFashionClipSearch(
+  db: D1Database,
+  convId: string,
+  data: FashionClipSearchData
+): Promise<void> {
+  const id = `${convId}_fcs_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  await db.prepare(`
+    INSERT OR IGNORE INTO fashion_clip_searches
+      (id, conv_id, ts, source, suffix, candidates_json, reranked,
+       rerank_winner, rerank_confidence, rerank_reasoning, final_handle, final_title, found_but_oos)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id, convId, Date.now(),
+    data.source, data.suffix ?? null,
+    data.candidatesJson,
+    data.reranked ? 1 : 0,
+    data.rerankWinner ?? null, data.rerankConfidence ?? null, data.rerankReasoning ?? null,
+    data.finalHandle ?? null, data.finalTitle ?? null,
+    data.foundButOos ? 1 : 0
+  ).run();
+}
+
 export async function updateSentiment(
   db: D1Database,
   convId: string,

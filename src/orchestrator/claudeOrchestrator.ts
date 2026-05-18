@@ -17,7 +17,7 @@ import { createSpokiTicket } from '../clients/spokiClient';
 import { getReturnByRMA } from '../clients/richreturnsClient';
 import { checkBarcodeAvailability } from '../clients/siacloudClient';
 import { checkAvailability } from '../clients/availabilityService';
-import { isBetaPhone } from '../utils/phone';
+import { isBetaPhone, isExperimentalPhone } from '../utils/phone';
 import { searchProductsBeta } from '../clients/shopifyClient';
 import { SIACLOUD_STORES } from '../data/siacloudStoreCodes';
 import {
@@ -29,8 +29,10 @@ import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
 import { markHumanActive } from '../storage/kvStore';
 import { getCategoryName } from '../data/skuSuffixes';
-import { insertApiCall, insertToolCall, insertThought, upsertConversation } from '../analytics/db';
+import { insertApiCall, insertToolCall, insertThought, insertFashionClipSearch, upsertConversation } from '../analytics/db';
 import type { ApiCallData } from '../analytics/db';
+import { rerankCandidates } from '../clients/imageReranker';
+import type { RerankResult } from '../clients/imageReranker';
 
 const STORES_CDN_URL = 'https://cdn.shopify.com/s/files/1/0624/0642/6862/files/stores.json?v=1774869600';
 
@@ -171,7 +173,9 @@ async function executeTool(
   input: Record<string, unknown>,
   clipEmbedding?: number[] | null,
   convId?: string,
-  beta = false
+  beta = false,
+  experimental = false,
+  userImage?: DownloadedImage | null
 ): Promise<string> {
   try {
     switch (name) {
@@ -377,7 +381,7 @@ async function executeTool(
           }
 
           if (embedding) {
-            const topK = beta ? 10 : 5;
+            const topK = (beta || experimental) ? 10 : 5;
             const topMatches = await findSimilarProducts(
               env,
               embedding,
@@ -389,6 +393,7 @@ async function executeTool(
               suffix: suffix || 'any',
               visual_description: visualDescription.slice(0, 120),
               count: topMatches.length,
+              experimental,
               top3: topMatches.slice(0, 3).map(m => ({
                 handle: m.handle,
                 score: Math.round(m.similarity * 1000) / 1000,
@@ -396,7 +401,30 @@ async function executeTool(
               })),
             }, phone);
 
+            // Snapshot dell'ordine originale Vectorize (prima del re-rank).
+            const originalTopMatches = [...topMatches];
+
+            // Experimental: Claude Sonnet 4.6 vision re-rank sui top candidati.
+            let rerankResult: RerankResult | null = null;
+            if (experimental && userImage && topMatches.length > 1) {
+              rerankResult = await rerankCandidates(
+                env,
+                userImage.base64,
+                userImage.mediaType,
+                topMatches,
+                phone
+              );
+              if (rerankResult) {
+                const winnerIdx = topMatches.findIndex(m => m.handle === rerankResult!.best_handle);
+                if (winnerIdx > 0) {
+                  const winner = topMatches.splice(winnerIdx, 1)[0]!;
+                  topMatches.unshift(winner);
+                }
+              }
+            }
+
             // Scegli il primo match con disponibilità > 0
+            let finalHandle: string | null = null;
             for (const match of topMatches) {
               try {
                 const detail = await getProductByHandle(env, match.handle);
@@ -407,6 +435,7 @@ async function executeTool(
                   available: hasStock,
                 }, phone);
                 if (!hasStock) continue;
+                finalHandle = match.handle;
                 matchResult = {
                   sku: match.sku,
                   title: match.title,
@@ -417,6 +446,7 @@ async function executeTool(
                 };
                 break;
               } catch {
+                finalHandle = match.handle;
                 matchResult = {
                   sku: match.sku,
                   title: match.title,
@@ -429,8 +459,31 @@ async function executeTool(
               }
             }
 
-            // Beta I4: se nessun match disponibile, ritorna comunque il top-1 con flag
-            if (beta && !matchResult && topMatches.length > 0) {
+            // Salva diagnostica ricerca immagine nel DB (solo experimental).
+            if (experimental && env.ZOE_DB && convId) {
+              const oosFlag = (beta || experimental) && !matchResult && topMatches.length > 0;
+              insertFashionClipSearch(env.ZOE_DB, convId, {
+                source,
+                suffix: suffix || undefined,
+                candidatesJson: JSON.stringify(
+                  originalTopMatches.slice(0, 10).map(m => ({
+                    handle: m.handle,
+                    title: m.title.slice(0, 80),
+                    similarity: Math.round(m.similarity * 1000) / 1000,
+                  }))
+                ),
+                reranked: !!rerankResult,
+                rerankWinner: rerankResult?.best_handle,
+                rerankConfidence: rerankResult?.confidence,
+                rerankReasoning: rerankResult?.reasoning,
+                finalHandle: finalHandle ?? topMatches[0]?.handle ?? undefined,
+                finalTitle: matchResult?.title ?? topMatches[0]?.title ?? undefined,
+                foundButOos: oosFlag,
+              }).catch(() => {});
+            }
+
+            // Beta/Experimental I4: se nessun match disponibile, ritorna comunque il top-1 con flag
+            if ((beta || experimental) && !matchResult && topMatches.length > 0) {
               const top = topMatches[0]!;
               matchResult = {
                 sku: top.sku,
@@ -446,6 +499,7 @@ async function executeTool(
                 search_url: searchUrl,
                 search_keywords: keywords,
                 visual_search_available: true,
+                rerank_applied: experimental && !!rerankResult,
               });
             }
           }
@@ -457,6 +511,7 @@ async function executeTool(
           search_keywords: keywords,
           visual_search_available: !!env.HF_SPACE_URL && !!env.PRODUCT_VECTORS,
         });
+
       }
       case 'get_return_status': {
         const rma = String(input.rma_number ?? '').trim();
@@ -704,6 +759,7 @@ export async function processMessage(
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const beta = isBetaPhone(phone, env.BETA_PHONES);
+  const experimental = isExperimentalPhone(phone, env.EXPERIMENTAL_PHONES);
 
   // Scarica immagini una sola volta (per Claude content e FashionCLIP embedding).
   const downloadedImages = images.length > 0 ? await downloadImages(images, phone) : [];
@@ -843,7 +899,7 @@ export async function processMessage(
             phone
           );
           const tStart = Date.now();
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId, beta);
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId, beta, experimental, firstImage);
           const duration = Date.now() - tStart;
           // Traccia tool call nel DB analytics, con input e output (troncato a 8KB).
           if (env.ZOE_DB && convId) {
