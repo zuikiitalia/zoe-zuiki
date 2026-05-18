@@ -221,11 +221,35 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     const phoneParam = url.searchParams.get('phone') ?? '';
     const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '3', 10), 20);
     if (!phoneParam) return c.json({ error: 'missing phone' }, 400);
-    const ph = await phoneHash(phoneParam.replace(/\D/g, ''));
-    const convs = await c.env.ZOE_DB
-      .prepare('SELECT * FROM conversations WHERE phone_hash = ? ORDER BY first_ts DESC LIMIT ?')
-      .bind(ph, limit)
-      .all();
+
+    // Spoki/storia possono aver salvato l'hash di diverse forme del numero (+39…, 39…, 10 cifre).
+    // Proviamo tutte le varianti plausibili finché non troviamo conversazioni.
+    const digits = phoneParam.replace(/\D/g, '');
+    const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
+    const with39 = last10.length === 10 ? '39' + last10 : digits;
+    const variants = Array.from(new Set([
+      digits,            // 393920057593
+      last10,            // 3920057593
+      with39,            // 393920057593 (idempotente)
+      '+' + with39,      // +393920057593  ← formato Spoki più comune
+      '+' + digits,
+    ]));
+    const hashes = await Promise.all(variants.map(v => phoneHash(v)));
+
+    let ph = '';
+    let convs: { results?: Record<string, unknown>[] } = { results: [] };
+    for (const candidate of hashes) {
+      const r = await c.env.ZOE_DB
+        .prepare('SELECT * FROM conversations WHERE phone_hash = ? ORDER BY first_ts DESC LIMIT ?')
+        .bind(candidate, limit)
+        .all();
+      if ((r.results ?? []).length > 0) {
+        ph = candidate;
+        convs = r;
+        break;
+      }
+    }
+    if (!ph) ph = hashes[0]!;
     const conversations = [];
     for (const conv of convs.results ?? []) {
       const convId = conv.id as string;

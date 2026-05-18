@@ -41,15 +41,27 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
     return c.json({ error: 'missing phone param' }, 400);
   }
 
-  const ph = await phoneHash(phoneParam);
   const db = c.env.ZOE_DB;
+  const lim = Math.min(limitParam, 20);
+  const digits = phoneParam.replace(/\D/g, '');
+  const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
+  const with39 = last10.length === 10 ? '39' + last10 : digits;
+  const variants = Array.from(new Set([digits, last10, with39, '+' + with39, '+' + digits]));
+  const hashes = await Promise.all(variants.map(v => phoneHash(v)));
 
-  const convs = await db
-    .prepare(
-      'SELECT * FROM conversations WHERE phone_hash = ? ORDER BY first_ts DESC LIMIT ?'
-    )
-    .bind(ph, Math.min(limitParam, 20))
-    .all();
+  let ph = hashes[0]!;
+  let convs: { results?: Record<string, unknown>[] } = { results: [] };
+  for (const candidate of hashes) {
+    const r = await db
+      .prepare('SELECT * FROM conversations WHERE phone_hash = ? ORDER BY first_ts DESC LIMIT ?')
+      .bind(candidate, lim)
+      .all();
+    if ((r.results ?? []).length > 0) {
+      ph = candidate;
+      convs = r;
+      break;
+    }
+  }
 
   const conversations = [];
   for (const conv of convs.results ?? []) {
