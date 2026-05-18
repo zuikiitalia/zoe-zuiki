@@ -14,6 +14,9 @@ export async function handleMigrate(c: Context<{ Bindings: Env }>): Promise<Resp
   const results: Record<string, string> = {};
   const migrations: Array<{ name: string; sql: string }> = [
     { name: 'add_phone_full', sql: 'ALTER TABLE conversations ADD COLUMN phone_full TEXT' },
+    { name: 'tool_input_json', sql: 'ALTER TABLE tool_calls ADD COLUMN input_json TEXT' },
+    { name: 'tool_output_json', sql: 'ALTER TABLE tool_calls ADD COLUMN output_json TEXT' },
+    { name: 'tool_duration_ms', sql: 'ALTER TABLE tool_calls ADD COLUMN duration_ms INTEGER' },
   ];
 
   for (const m of migrations) {
@@ -78,7 +81,7 @@ export async function handleInvestigate(c: Context<{ Bindings: Env }>): Promise<
         .all(),
       db
         .prepare(
-          'SELECT ts, tool_name, success FROM tool_calls WHERE conv_id = ? ORDER BY ts ASC'
+          'SELECT ts, tool_name, success, input_json, output_json, duration_ms FROM tool_calls WHERE conv_id = ? ORDER BY ts ASC'
         )
         .bind(convId)
         .all(),

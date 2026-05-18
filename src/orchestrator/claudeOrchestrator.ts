@@ -833,10 +833,22 @@ export async function processMessage(
             { tool: block.name, input: block.input },
             phone
           );
+          const tStart = Date.now();
           const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId, beta);
-          // Traccia tool call nel DB analytics.
+          const duration = Date.now() - tStart;
+          // Traccia tool call nel DB analytics, con input e output (troncato a 8KB).
           if (env.ZOE_DB && convId) {
-            insertToolCall(env.ZOE_DB, convId, { toolName: block.name, success: true }).catch(() => {});
+            const inputJson = (() => {
+              try { return JSON.stringify(block.input).slice(0, 4000); } catch { return null; }
+            })();
+            const outputJson = typeof result === 'string' ? result.slice(0, 8000) : JSON.stringify(result).slice(0, 8000);
+            insertToolCall(env.ZOE_DB, convId, {
+              toolName: block.name,
+              success: true,
+              inputJson: inputJson ?? undefined,
+              outputJson,
+              durationMs: duration,
+            }).catch(() => {});
           }
           toolResults.push({
             type: 'tool_result',

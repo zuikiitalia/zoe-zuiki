@@ -260,7 +260,7 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
           'SELECT role, content, ts FROM messages WHERE phone_hash = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
         ).bind(ph, firstTs, lastTs + 120_000).all(),
         c.env.ZOE_DB.prepare(
-          'SELECT ts, tool_name, success FROM tool_calls WHERE conv_id = ? ORDER BY ts ASC'
+          'SELECT ts, tool_name, success, input_json, output_json, duration_ms FROM tool_calls WHERE conv_id = ? ORDER BY ts ASC'
         ).bind(convId).all(),
         c.env.ZOE_DB.prepare(
           'SELECT ts, model, input_tokens, output_tokens, cache_read_tokens, latency_ms, iteration, stop_reason, cost_usd FROM api_calls WHERE conv_id = ? ORDER BY ts ASC'
@@ -752,7 +752,19 @@ function renderInvConv(c){
     if(e.type==='tool'){
       const icon=TOOL_ICONS[e.name]||'🔧';
       const status=e.success?'<span style="color:#10b981">✓</span>':'<span style="color:#ef4444">✗</span>';
-      return '<div style="font-size:12px;color:#475569;padding:2px 0;font-family:monospace">  ['+t+'] '+icon+' '+status+' '+e.name+'</div>';
+      const dur=e.duration_ms?' <span style="color:#94a3b8">'+e.duration_ms+'ms</span>':'';
+      let inputSummary='';
+      if(e.input_json){
+        try{
+          const inp=JSON.parse(e.input_json);
+          inputSummary=' <span style="color:#4f46e5">'+Object.entries(inp).map(([k,v])=>k+'='+JSON.stringify(v).slice(0,60)).join(' ')+'</span>';
+        }catch{ inputSummary=' '+e.input_json.slice(0,120); }
+      }
+      const detailId='td-'+Math.random().toString(36).slice(2,9);
+      const hasDetails=e.input_json||e.output_json;
+      const expander=hasDetails?'<a href="#" onclick="document.getElementById(\\''+detailId+'\\').style.display=document.getElementById(\\''+detailId+'\\').style.display===\\'block\\'?\\'none\\':\\'block\\';return false" style="color:#4f46e5;font-size:11px;margin-left:8px">[dettagli]</a>':'';
+      const details=hasDetails?'<div id="'+detailId+'" style="display:none;margin:4px 0 4px 24px;padding:8px 10px;background:#1e293b;color:#e2e8f0;border-radius:6px;font-size:11px;font-family:monospace;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow:auto"><div style="color:#94a3b8;margin-bottom:4px">INPUT:</div>'+(e.input_json||'(nessuno)').replace(/</g,'&lt;')+'<div style="color:#94a3b8;margin:8px 0 4px">OUTPUT:</div>'+(e.output_json||'(nessuno)').replace(/</g,'&lt;')+'</div>':'';
+      return '<div style="font-size:12px;color:#475569;padding:2px 0;font-family:monospace">  ['+t+'] '+icon+' '+status+' <b>'+e.name+'</b>'+inputSummary+dur+expander+'</div>'+details;
     }
     const cost=e.cost_usd!=null?'$'+Number(e.cost_usd).toFixed(4):'';
     return '<div style="font-size:11px;color:#94a3b8;padding:1px 0;font-family:monospace">  ['+t+'] 🧠 iter='+e.iteration+' in='+e.input_tokens+' out='+e.output_tokens+' cache='+e.cache_read_tokens+' '+e.latency_ms+'ms '+e.stop_reason+' '+cost+'</div>';

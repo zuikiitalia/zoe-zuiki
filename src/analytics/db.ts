@@ -28,6 +28,9 @@ export interface ApiCallData {
 export interface ToolCallData {
   toolName: string;
   success: boolean;
+  inputJson?: string;
+  outputJson?: string;
+  durationMs?: number;
 }
 
 export interface ConversationUpdate {
@@ -94,11 +97,14 @@ export async function insertApiCall(db: D1Database, convId: string, call: ApiCal
 }
 
 export async function insertToolCall(db: D1Database, convId: string, call: ToolCallData): Promise<void> {
-  const id = `${convId}_${call.toolName}_${Date.now()}`;
+  const id = `${convId}_${call.toolName}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   await db.prepare(`
-    INSERT OR IGNORE INTO tool_calls (id, conv_id, ts, tool_name, success)
-    VALUES (?,?,?,?,?)
-  `).bind(id, convId, Date.now(), call.toolName, call.success ? 1 : 0).run();
+    INSERT OR IGNORE INTO tool_calls (id, conv_id, ts, tool_name, success, input_json, output_json, duration_ms)
+    VALUES (?,?,?,?,?,?,?,?)
+  `).bind(
+    id, convId, Date.now(), call.toolName, call.success ? 1 : 0,
+    call.inputJson ?? null, call.outputJson ?? null, call.durationMs ?? null
+  ).run();
 }
 
 // === Storia permanente messaggi (no scadenza) ===
