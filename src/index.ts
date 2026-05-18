@@ -17,37 +17,6 @@ app.get('/dashboard', handleDashboardHTML);
 app.get('/dashboard/api/*', handleDashboardAPI);
 app.post('/dashboard/api/*', handleDashboardAPI);
 
-// Endpoint debug temporaneo — analisi conversazione per numero
-app.get('/debug/chat/:phone', async (c) => {
-  if (c.req.query('token') !== 'zoe-debug-2026') return c.json({ error: 'unauthorized' }, 401);
-  const phone = c.req.param('phone');
-  const env = c.env;
-  const { phoneHash, loadFullHistory } = await import('./analytics/db');
-  const { isHumanActive } = await import('./storage/kvStore');
-  const hash = await phoneHash(phone);
-  const history = env.ZOE_DB ? await loadFullHistory(env.ZOE_DB, hash) : [];
-  const humanActive = await isHumanActive(env.ZOE_KV, phone);
-  return c.json({
-    phone,
-    phone_hash: hash,
-    human_active: humanActive,
-    message_count: history.length,
-    messages: history.map(m => ({
-      role: m.role,
-      ts: new Date(m.ts).toISOString(),
-      content: m.content.slice(0, 400),
-    })),
-  });
-});
-
-// Endpoint debug — payload degli ultimi template outbound per un numero
-app.get('/debug/template/:phone', async (c) => {
-  if (c.req.query('token') !== 'zoe-debug-2026') return c.json({ error: 'unauthorized' }, 401);
-  const phone = c.req.param('phone');
-  const data = await c.env.ZOE_KV.get(`debug:last_outbound:${phone}`, 'json');
-  return c.json({ phone, captured: data ?? [] });
-});
-
 app.notFound((c) => c.json({ error: 'not_found' }, 404));
 
 app.onError((err, c) => {

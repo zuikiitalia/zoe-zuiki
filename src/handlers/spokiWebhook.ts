@@ -246,18 +246,6 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
 
       const isAutomationType = t === 'template' || t === 'whatsapp_campaign' || t === 'campaign';
 
-      // DEBUG: cattura payload completo di TUTTI gli outbound non-note (TTL 48h, ultimi 5)
-      // Necessario per identificare campo che distingue operatore-template vs automazione.
-      try {
-        const captureKey = `debug:last_outbound:${out.phone}`;
-        const existing = (await env.ZOE_KV.get(captureKey, 'json') as unknown[] | null) ?? [];
-        const captured = [
-          { ts: new Date().toISOString(), isService: out.isService, spokiType: out.spokiType, payload },
-          ...existing,
-        ].slice(0, 5);
-        await env.ZOE_KV.put(captureKey, JSON.stringify(captured), { expirationTtl: 172800 });
-      } catch { /* non bloccante */ }
-
       // Helper: salva messaggio outbound in history (D1 + KV)
       const saveOutboundToHistory = async (content: string) => {
         const now = Date.now();
@@ -286,9 +274,14 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         return;
       }
 
-      // 3. Operatore umano (is_service === false + type Message)
-      if (out.isService === false && !isAutomationType) {
-        await saveOutboundToHistory(`[Operatore CC]: ${out.text}`);
+      // 3. Operatore umano: sender.is_service === false → SEMPRE operatore, indipendentemente
+      // dal type (Message digitato O Template cliccato dall'operatore in Spoki UI).
+      // Verificato con payload reale 2026-05-18: operatore clicca "invia template" →
+      // sender.is_service:false + sender.email/firstname/surname dell'operatore.
+      // Le automazioni Spoki (Shopify Ordine Spedito ecc.) usano sender system con is_service:true.
+      if (out.isService === false) {
+        const tag = isAutomationType ? '[Operatore CC - Template]' : '[Operatore CC]';
+        await saveOutboundToHistory(`${tag}: ${out.text}`);
         await markHumanActive(env.ZOE_KV, out.phone);
         logger.info('human_operator_detected', { chars: out.text.length, type: out.spokiType }, out.phone);
         return;
