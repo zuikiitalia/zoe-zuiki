@@ -44,7 +44,7 @@ app.get('/debug/chat/:phone', async (c) => {
 app.get('/debug/template/:phone', async (c) => {
   if (c.req.query('token') !== 'zoe-debug-2026') return c.json({ error: 'unauthorized' }, 401);
   const phone = c.req.param('phone');
-  const data = await c.env.ZOE_KV.get(`debug:last_template:${phone}`, 'json');
+  const data = await c.env.ZOE_KV.get(`debug:last_outbound:${phone}`, 'json');
   return c.json({ phone, captured: data ?? [] });
 });
 
