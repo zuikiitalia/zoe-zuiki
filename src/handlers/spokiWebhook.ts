@@ -264,6 +264,16 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       // 2. API / automazione Spoki (is_service === true)
       if (out.isService === true) {
         if (isAutomationType) {
+          // Cattura payload completo in KV per diagnostica (ultimi 3 template, TTL 48h)
+          try {
+            const captureKey = `debug:last_template:${out.phone}`;
+            const existing = await env.ZOE_KV.get(captureKey, 'json') as unknown[] | null ?? [];
+            const captured = [
+              { ts: new Date().toISOString(), payload_sample: payload },
+              ...existing,
+            ].slice(0, 3);
+            await env.ZOE_KV.put(captureKey, JSON.stringify(captured), { expirationTtl: 172800 });
+          } catch { /* non bloccante */ }
           // Automazione Spoki (es. "Ordine Spedito", "IN Giacenza") → salva per contesto
           await saveOutboundToHistory(`[Notifica Zuiki]: ${out.text}`);
           logger.info('outbound_automation_saved', { type: out.spokiType, chars: out.text.length }, out.phone);
