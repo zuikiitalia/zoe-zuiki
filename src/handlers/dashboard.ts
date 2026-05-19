@@ -489,23 +489,32 @@ function dur(a,b){ const m=Math.round((b-a)/60000); if(m<1)return '<1 min'; if(m
 async function api(path,opts){
   const r=await fetch('/dashboard/api'+path,Object.assign({headers:{Authorization:'Bearer '+SECRET}},opts||{}));
   if(r.status===401){logout();return null;}
-  return r.json();
+  if(!r.ok){const txt=await r.text().catch(()=>'');console.error('API error',r.status,txt.slice(0,200));return null;}
+  try{return await r.json();}catch(e){console.error('API json parse error',e);return null;}
 }
 
 function doLogin(){
+  const errEl=document.getElementById('login-err');
+  errEl.style.display='none';
   SECRET=document.getElementById('pwd').value.trim();
+  if(!SECRET){errEl.textContent='Inserisci la password.';errEl.style.display='block';return;}
   api('/summary?from='+daysAgo(30)+'&to='+today()).then(data=>{
-    if(!data||data.error){document.getElementById('login-err').style.display='block';SECRET='';return;}
+    if(!data||data.error){errEl.textContent='Password non valida.';errEl.style.display='block';SECRET='';return;}
     document.getElementById('login').style.display='none';
     document.getElementById('app').style.display='block';
     sessionStorage.setItem('dash_secret',SECRET);
     initFilters();
     reload();
+  }).catch(e=>{
+    console.error('doLogin error',e);
+    errEl.textContent='Errore di connessione. Riprova.';
+    errEl.style.display='block';
+    SECRET='';
   });
 }
 document.getElementById('pwd').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
 
-function logout(){SECRET='';sessionStorage.removeItem('dash_secret');document.getElementById('login').style.display='flex';document.getElementById('app').style.display='none';}
+function logout(){SECRET='';sessionStorage.removeItem('dash_secret');document.getElementById('login').style.display='flex';document.getElementById('app').style.display='none';document.getElementById('pwd').value='';}
 
 function initFilters(){
   document.getElementById('f-from').value=daysAgo(30);
