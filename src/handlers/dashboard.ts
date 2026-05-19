@@ -18,7 +18,6 @@ function tsToDateRange(from: string | null, to: string | null): { fromMs: number
 }
 
 export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise<Response> {
-  if (!checkAuth(c)) return c.json({ error: 'unauthorized' }, 401);
   if (!c.env.ZOE_DB) return c.json({ error: 'no_db' }, 503);
 
   const url = new URL(c.req.url);
@@ -316,14 +315,7 @@ export function handleDashboardHTML(_c: Context<{ Bindings: Env }>): Response {
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e;min-height:100vh}
-#login{display:flex;align-items:center;justify-content:center;min-height:100vh}
-#login-box{background:#fff;border-radius:12px;padding:40px;width:320px;box-shadow:0 4px 20px rgba(0,0,0,.1)}
-#login-box h2{margin-bottom:20px;color:#4f46e5;font-size:1.4rem}
-#login-box input{width:100%;padding:10px 14px;border:1px solid #d1d5db;border-radius:8px;font-size:.95rem;margin-bottom:12px}
-#login-box button{width:100%;padding:11px;background:#4f46e5;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:.95rem;font-weight:600}
-#login-box button:hover{background:#4338ca}
-#login-err{color:#ef4444;font-size:.85rem;margin-top:8px;display:none}
-#app{display:none}
+#app{display:block}
 header{background:#4f46e5;color:#fff;padding:16px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 header h1{font-size:1.2rem;font-weight:700}
 .filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto}
@@ -384,15 +376,6 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
 </style>
 </head>
 <body>
-
-<div id="login">
-  <div id="login-box">
-    <h2>🤖 Zoe Dashboard</h2>
-    <input type="password" id="pwd" placeholder="Password" autocomplete="current-password"/>
-    <button onclick="doLogin()">Accedi</button>
-    <div id="login-err">Password non valida.</div>
-  </div>
-</div>
 
 <div id="app">
   <header>
@@ -474,7 +457,6 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
 </div>
 
 <script>
-let SECRET = '';
 let chartModel=null, chartSentiment=null, chartTicket=null, chartTokens=null, chartTools=null;
 let convPage=0, convTotal=0;
 const LIMIT=50;
@@ -487,34 +469,10 @@ function fmtCost(n){ return n!=null ? '$'+Number(n).toFixed(4) : '$0.0000'; }
 function dur(a,b){ const m=Math.round((b-a)/60000); if(m<1)return '<1 min'; if(m<60)return m+' min'; return Math.round(m/60)+'h '+m%60+'m'; }
 
 async function api(path,opts){
-  const r=await fetch('/dashboard/api'+path,Object.assign({headers:{Authorization:'Bearer '+SECRET}},opts||{}));
-  if(r.status===401){logout();return null;}
+  const r=await fetch('/dashboard/api'+path,opts||{});
   if(!r.ok){const txt=await r.text().catch(()=>'');console.error('API error',r.status,txt.slice(0,200));return null;}
   try{return await r.json();}catch(e){console.error('API json parse error',e);return null;}
 }
-
-function doLogin(){
-  const errEl=document.getElementById('login-err');
-  errEl.style.display='none';
-  SECRET=document.getElementById('pwd').value.trim();
-  if(!SECRET){errEl.textContent='Inserisci la password.';errEl.style.display='block';return;}
-  api('/summary?from='+daysAgo(30)+'&to='+today()).then(data=>{
-    if(!data||data.error){errEl.textContent='Password non valida.';errEl.style.display='block';SECRET='';return;}
-    document.getElementById('login').style.display='none';
-    document.getElementById('app').style.display='block';
-    sessionStorage.setItem('dash_secret',SECRET);
-    initFilters();
-    reload();
-  }).catch(e=>{
-    console.error('doLogin error',e);
-    errEl.textContent='Errore di connessione. Riprova.';
-    errEl.style.display='block';
-    SECRET='';
-  });
-}
-document.getElementById('pwd').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
-
-function logout(){SECRET='';sessionStorage.removeItem('dash_secret');document.getElementById('login').style.display='flex';document.getElementById('app').style.display='none';document.getElementById('pwd').value='';}
 
 function initFilters(){
   document.getElementById('f-from').value=daysAgo(30);
@@ -832,6 +790,7 @@ document.getElementById('conv-modal').addEventListener('click',e=>{if(e.target==
 document.getElementById('inv-phone').addEventListener('keydown',e=>{if(e.key==='Enter')runInvestigate();});
 
 async function loadImageSearches(){
+
   const {from,to}=getFilters();
   const el=document.getElementById('imgsearch-result');
   el.innerHTML='<div class="spinner">Caricamento…</div>';
@@ -865,9 +824,8 @@ async function loadImageSearches(){
   }).join('')+'</tbody></table>';
 }
 
-// Auto-login da sessionStorage
-const saved=sessionStorage.getItem('dash_secret');
-if(saved){SECRET=saved;document.getElementById('pwd').value=saved;doLogin();}
+initFilters();
+reload();
 </script>
 </body>
 </html>`;
