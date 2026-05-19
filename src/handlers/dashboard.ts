@@ -815,14 +815,16 @@ async function loadImageSearches(){
       '<td style="padding:5px 8px;font-size:11px;color:#64748b">'+fmtTime(r.ts)+'</td>'+
       '<td style="padding:5px 8px"><span style="background:#ede9fe;color:#4f46e5;padding:2px 6px;border-radius:4px;font-size:11px">'+(r.source||'?')+(r.suffix?' ('+r.suffix+')':'')+'</span></td>'+
       '<td style="padding:5px 8px"><span style="font-size:12px">'+top1.handle+'</span><span style="color:#94a3b8;font-size:10px;margin-left:4px">'+(top1.similarity?Math.round(top1.similarity*100)+'%':'')+'</span>'+
-        '<a href="#" onclick="document.getElementById(\''+detId+'\').style.display=document.getElementById(\''+detId+'\').style.display===\'block\'?\'none\':\'block\';return false" style="color:#4f46e5;font-size:10px;margin-left:6px">[tutti]</a>'+
+        '<a href="#" data-toggle="'+detId+'" onclick="toggleDet(this);return false" style="color:#4f46e5;font-size:10px;margin-left:6px">[tutti]</a>'+
         '<div id="'+detId+'" style="display:none">'+candidateList+'</div></td>'+
       '<td style="padding:5px 8px">'+rerankBadge+(r.rerank_reasoning?'<br><span style="font-size:10px;color:#475569">'+r.rerank_reasoning.slice(0,80).replace(/</g,'&lt;')+'</span>':'')+'</td>'+
       '<td style="padding:5px 8px"><span style="font-size:12px">'+(r.final_handle||'—')+'</span>'+rerankNote+oosBadge+'<br><span style="font-size:10px;color:#94a3b8">'+(r.final_title||'').slice(0,40).replace(/</g,'&lt;')+'</span></td>'+
-      '<td style="padding:5px 8px"><a href="#" onclick="openConv(\''+r.conv_id+'\');return false" style="color:#4f46e5;font-size:11px">apri</a></td>'+
+      '<td style="padding:5px 8px"><a href="#" data-conv="'+r.conv_id+'" onclick="openConv(this.dataset.conv);return false" style="color:#4f46e5;font-size:11px">apri</a></td>'+
     '</tr>';
   }).join('')+'</tbody></table>';
 }
+
+function toggleDet(el){const id=el.dataset.toggle;const d=document.getElementById(id);d.style.display=d.style.display==='block'?'none':'block';}
 
 initFilters();
 reload();
