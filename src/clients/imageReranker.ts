@@ -4,7 +4,7 @@ import type { SimilarProductMatch } from './vectorizeClient';
 import { logger } from '../utils/logger';
 
 const RERANK_MODEL = 'claude-sonnet-4-6';
-export const RERANK_CONFIDENCE_THRESHOLD = 0.5;
+export const RERANK_CONFIDENCE_THRESHOLD = 0.3;
 // 25 candidati: abbastanza per coprire i top-K Vectorize + i risultati text-search
 // senza esplodere il costo per immagine (~$0.025/call con 25 immagini URL).
 const MAX_CANDIDATES = 25;

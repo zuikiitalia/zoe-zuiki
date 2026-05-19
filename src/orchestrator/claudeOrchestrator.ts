@@ -481,13 +481,15 @@ async function executeTool(
               return base;
             };
 
-            // Path experimental con rerank ad alta confidence:
+            // Path experimental con rerank:
             // committiamo sul winner anche se OOS — un cardigan in viscosa "disponibile"
             // ma sbagliato è peggio di un traforato corretto ma esaurito.
             // In più estraiamo varianti disponibili (altri colori/taglie dello stesso modello)
             // e alternative simili in-stock dai top-K rerankati.
-            if (experimental && rerankResult && rerankResult.confidence >= 0.7 && topMatches.length > 0) {
-              const winner = topMatches[0]!;
+            if (experimental && rerankResult && rerankResult.confidence >= 0.5 && topMatches.length > 0) {
+              // Usa il prodotto scelto da Sonnet (best_handle), non necessariamente il top-1 Vectorize.
+              const winnerMatch = topMatches.find(m => m.handle === rerankResult!.best_handle) ?? topMatches[0]!;
+              const winner = winnerMatch;
               try {
                 const detail = await getProductByHandleEnriched(env, winner.handle);
                 const totalInv = detail.total_inventory ?? 0;
@@ -596,6 +598,51 @@ async function executeTool(
                 }, phone);
                 // Fall through al path normale sotto.
               }
+            }
+
+            // Fallback experimental: reranker assente/low-confidence, ma c'era un'immagine utente.
+            // NON usare la loop disponibilità (che prende il primo in-stock ignorando la texture):
+            // restituisci il top-1 Vectorize mostrando correttamente se è OOS.
+            if (experimental && userImage && !matchResult && topMatches.length > 0) {
+              const top = topMatches[0]!;
+              let topInv = 0;
+              try {
+                const topDetail = await getProductByHandle(env, top.handle);
+                topInv = topDetail.total_inventory ?? 0;
+              } catch { /* assume unavailable */ }
+              matchResult = {
+                sku: top.sku,
+                title: top.title,
+                url: top.url,
+                image_url: top.image_url,
+                category: getCategoryName(top.sku_suffix),
+                similarity_percent: similarityFor(top.similarity),
+              };
+              if (env.ZOE_DB && convId) {
+                insertFashionClipSearch(env.ZOE_DB, convId, {
+                  source,
+                  suffix: suffix || undefined,
+                  candidatesJson: JSON.stringify(
+                    originalTopMatches.slice(0, 10).map(m => ({
+                      handle: m.handle,
+                      title: m.title.slice(0, 80),
+                      similarity: Math.round(m.similarity * 1000) / 1000,
+                    }))
+                  ),
+                  reranked: false,
+                  finalHandle: top.handle,
+                  finalTitle: top.title,
+                  foundButOos: topInv === 0,
+                }).catch(() => {});
+              }
+              return JSON.stringify({
+                match: matchResult,
+                found_but_all_oos: topInv === 0,
+                rerank_applied: false,
+                search_url: searchUrl,
+                search_keywords: keywords,
+                visual_search_available: true,
+              });
             }
 
             // Scegli il primo match con disponibilità > 0
