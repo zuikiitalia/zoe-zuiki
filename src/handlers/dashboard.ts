@@ -293,6 +293,59 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     return c.json({ searches: rows.results ?? [] });
   }
 
+  // GET /dashboard/api/cost-by-source — costi per giorno + sorgente (conversazioni vs review)
+  if (path === '/cost-by-source') {
+    const days = Math.min(parseInt(url.searchParams.get('days') ?? '30', 10), 90);
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const [byDay, topConvs, perConv] = await Promise.all([
+      // Costo per giorno e sorgente
+      c.env.ZOE_DB.prepare(`
+        SELECT
+          date(ts/1000, 'unixepoch') AS day,
+          CASE WHEN conv_id LIKE 'review_%' THEN 'review' ELSE 'conversation' END AS source,
+          SUM(cost_usd) AS cost,
+          COUNT(*) AS calls,
+          SUM(input_tokens) AS input_tokens,
+          SUM(output_tokens) AS output_tokens,
+          SUM(cache_read_tokens) AS cache_read_tokens
+        FROM api_calls
+        WHERE ts >= ?
+        GROUP BY day, source
+        ORDER BY day DESC
+      `).bind(sinceMs).all(),
+      // Top 10 conversazioni più costose
+      c.env.ZOE_DB.prepare(`
+        SELECT a.conv_id, SUM(a.cost_usd) AS total_cost,
+               COUNT(*) AS calls, SUM(a.input_tokens) AS input_tokens,
+               c.phone_full, c.first_ts
+        FROM api_calls a
+        LEFT JOIN conversations c ON c.id = a.conv_id
+        WHERE a.ts >= ? AND a.conv_id NOT LIKE 'review_%'
+        GROUP BY a.conv_id
+        ORDER BY total_cost DESC LIMIT 10
+      `).bind(sinceMs).all(),
+      // Statistiche per conversazione
+      c.env.ZOE_DB.prepare(`
+        SELECT
+          AVG(s.cost) AS avg_cost,
+          MAX(s.cost) AS max_cost,
+          SUM(s.cost) AS total_cost,
+          COUNT(*) AS conv_count
+        FROM (
+          SELECT conv_id, SUM(cost_usd) AS cost
+          FROM api_calls
+          WHERE ts >= ? AND conv_id NOT LIKE 'review_%'
+          GROUP BY conv_id
+        ) s
+      `).bind(sinceMs).first(),
+    ]);
+    return c.json({
+      by_day: byDay.results ?? [],
+      top_conversations: topConvs.results ?? [],
+      per_conv_stats: perConv,
+    });
+  }
+
   // POST /dashboard/api/run-review — trigger manuale (utile per test)
   if (path === '/run-review') {
     if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: 'no_anthropic_key' }, 503);
@@ -401,6 +454,10 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
     <div class="grid2" id="charts-row2">
       <div class="panel"><h3>Token per modello</h3><div class="chart-wrap"><canvas id="ch-tokens"></canvas></div></div>
       <div class="panel"><h3>Tool più usati</h3><div class="chart-wrap"><canvas id="ch-tools"></canvas></div></div>
+    </div>
+    <div class="panel" id="cost-breakdown-panel">
+      <h3>💸 Costi per sorgente <button onclick="loadCostBreakdown()" style="float:right;font-size:12px;padding:4px 10px;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer">Aggiorna</button></h3>
+      <div id="cost-breakdown-result"><p style="color:#94a3b8;font-size:.84rem">Caricamento…</p></div>
     </div>
     <div class="panel" id="investigate-panel">
       <h3>🔬 Indaga conversazione per numero</h3>
@@ -826,8 +883,72 @@ async function loadImageSearches(){
 
 function toggleDet(el){const id=el.dataset.toggle;const d=document.getElementById(id);d.style.display=d.style.display==='block'?'none':'block';}
 
+async function loadCostBreakdown(){
+  const el=document.getElementById('cost-breakdown-result');
+  el.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/cost-by-source?days=30');
+  if(!data){el.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+
+  const byDay=data.by_day||[];
+  const topConvs=data.top_conversations||[];
+  const stats=data.per_conv_stats||{};
+
+  // Aggrega per giorno (conv + review separati)
+  const dayMap={};
+  byDay.forEach(r=>{
+    if(!dayMap[r.day])dayMap[r.day]={day:r.day,conversation:0,review:0};
+    dayMap[r.day][r.source]=(dayMap[r.day][r.source]||0)+(+r.cost||0);
+  });
+  const days=Object.values(dayMap).sort((a,b)=>a.day<b.day?-1:1);
+
+  // Totali
+  const totConv=byDay.filter(r=>r.source==='conversation').reduce((s,r)=>s+(+r.cost||0),0);
+  const totRev=byDay.filter(r=>r.source==='review').reduce((s,r)=>s+(+r.cost||0),0);
+
+  // Giorno più costoso
+  const maxDay=days.reduce((m,d)=>((d.conversation+d.review)>(m.conversation+m.review)?d:m),{day:'—',conversation:0,review:0});
+
+  el.innerHTML=\`
+  <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Conv (30gg)</div><div class="value" style="font-size:1.3rem">\${fmtCost(totConv)}</div><div class="sub">\${stats.conv_count||0} conv, media \${fmtCost(stats.avg_cost||0)}</div></div>
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Review notturna (30gg)</div><div class="value" style="font-size:1.3rem">\${fmtCost(totRev)}</div><div class="sub">Opus analisi qualità</div></div>
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Giorno più caro</div><div class="value" style="font-size:1.1rem">\${maxDay.day}</div><div class="sub">\${fmtCost((maxDay.conversation||0)+(maxDay.review||0))}</div></div>
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Conv più cara</div><div class="value" style="font-size:1.1rem">\${fmtCost(stats.max_cost||0)}</div><div class="sub">singola conversazione</div></div>
+  </div>
+  <div style="margin-bottom:14px">
+    <div style="font-size:.8rem;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Costo per giorno (ultime 30gg)</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.8rem">
+      <thead><tr style="background:#f9fafb"><th style="padding:5px 8px;text-align:left;color:#6b7280">Giorno</th><th style="padding:5px 8px;text-align:right;color:#4f46e5">Conversazioni</th><th style="padding:5px 8px;text-align:right;color:#7c3aed">Review</th><th style="padding:5px 8px;text-align:right;color:#374151">Totale</th></tr></thead>
+      <tbody>\${days.slice().reverse().map(d=>{
+        const tot=(d.conversation||0)+(d.review||0);
+        const barW=Math.round((tot/((maxDay.conversation||0)+(maxDay.review||0)))*100);
+        return '<tr style="border-bottom:1px solid #f3f4f6">'+
+          '<td style="padding:4px 8px;font-family:monospace;font-size:11px">'+d.day+'</td>'+
+          '<td style="padding:4px 8px;text-align:right;color:#4f46e5">'+fmtCost(d.conversation||0)+'</td>'+
+          '<td style="padding:4px 8px;text-align:right;color:#7c3aed">'+fmtCost(d.review||0)+'</td>'+
+          '<td style="padding:4px 8px;text-align:right;font-weight:600"><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><div style="height:6px;background:#4f46e5;border-radius:3px;width:'+barW+'px;min-width:2px;max-width:80px"></div>'+fmtCost(tot)+'</div></td>'+
+        '</tr>';
+      }).join('')}</tbody>
+    </table></div>
+  </div>
+  \${topConvs.length?
+  '<div><div style="font-size:.8rem;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Top 10 conversazioni più costose</div>'+
+  '<table style="width:100%;border-collapse:collapse;font-size:.8rem">'+
+  '<thead><tr style="background:#f9fafb"><th style="padding:5px 8px;text-align:left;color:#6b7280">Cliente</th><th style="padding:5px 8px;text-align:right;color:#6b7280">Costo</th><th style="padding:5px 8px;text-align:right;color:#6b7280">Chiamate</th><th style="padding:5px 8px;text-align:right;color:#6b7280">Token in</th><th style="padding:5px 8px;text-align:left;color:#6b7280">Data</th></tr></thead>'+
+  '<tbody>'+topConvs.map(c=>'<tr style="border-bottom:1px solid #f3f4f6">'+
+    '<td style="padding:4px 8px"><a href="#" data-conv="'+c.conv_id+'" onclick="openConv(this.dataset.conv);return false" style="color:#4f46e5;font-size:11px">'+(c.phone_full?'+'+c.phone_full:c.conv_id.slice(0,16)+'…')+'</a></td>'+
+    '<td style="padding:4px 8px;text-align:right;font-weight:600;color:#ef4444">'+fmtCost(c.total_cost)+'</td>'+
+    '<td style="padding:4px 8px;text-align:right;color:#6b7280">'+c.calls+'</td>'+
+    '<td style="padding:4px 8px;text-align:right;color:#6b7280">'+fmtNum(c.input_tokens)+'</td>'+
+    '<td style="padding:4px 8px;font-size:11px;color:#94a3b8">'+fmt(c.first_ts)+'</td>'+
+  '</tr>').join('')+
+  '</tbody></table></div>'
+  :''}\`;
+}
+
 initFilters();
 reload();
+loadCostBreakdown();
 </script>
 </body>
 </html>`;

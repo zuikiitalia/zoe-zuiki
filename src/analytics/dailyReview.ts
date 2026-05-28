@@ -1,6 +1,7 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import Anthropic from '@anthropic-ai/sdk';
-import { loadFullHistory } from './db';
+import { insertApiCall } from './db';
+import { computeCostUsd } from './costs';
 import { logger } from '../utils/logger';
 
 // Opus 4.7 per la review giornaliera: il job non è latency-sensitive e la qualità
@@ -54,21 +55,43 @@ export async function runDailyReview(
   let analyzed = 0;
   let totalFindings = 0;
 
+  // Conv ID sintetico per aggregare i costi della review nel DB (formato riconoscibile)
+  const reviewConvId = `review_${dateStr}`;
+
   for (const conv of convs.results ?? []) {
     try {
-      const messages = await loadFullHistory(db, conv.phone_hash);
+      // Carica solo i messaggi degli ultimi 7 giorni (non tutta la storia del cliente)
+      const since7d = yesterday00 - 6 * 24 * 60 * 60 * 1000;
+      const msgRows = await db.prepare(
+        `SELECT role, content FROM messages WHERE phone_hash = ? AND ts >= ? ORDER BY ts ASC`
+      ).bind(conv.phone_hash, since7d).all<{ role: string; content: string }>();
+      const messages = msgRows.results ?? [];
       if (messages.length < 2) continue;
 
       const convText = messages
         .map(m => `${m.role.toUpperCase()}: ${m.content}`)
         .join('\n\n');
 
+      const t0 = Date.now();
       const resp = await anthropic.messages.create({
         model: REVIEW_MODEL,
         max_tokens: 1024,
         system: REVIEW_SYSTEM,
         messages: [{ role: 'user', content: convText.slice(0, 30_000) }],
       });
+
+      // Traccia il costo nel DB così appare nel dashboard
+      const usage = resp.usage as { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+      await insertApiCall(db, reviewConvId, {
+        model: REVIEW_MODEL,
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+        cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+        latencyMs: Date.now() - t0,
+        iteration: 0,
+        stopReason: resp.stop_reason ?? 'end_turn',
+      }).catch(() => {});
 
       const text = resp.content
         .filter(b => b.type === 'text')
