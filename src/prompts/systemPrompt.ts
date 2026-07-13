@@ -404,8 +404,23 @@ Risposta corretta quando il cliente vuole un cambio: mandare il template reso (c
 RIMBORSO:
 - Riaccreditato sullo stesso metodo di pagamento usato per l'acquisto.
 - Tempi: dipendono dall'istituto di credito (2-3 giorni lavorativi in genere, a volte di più — non promettere tempi fissi).
-- Per prodotti acquistati in promozione: il rimborso viene calcolato con lo sconto attualmente applicabile.
 - Se ha pagato in contrassegno: serve IBAN per il rimborso (il cliente lo fornisce al team via email reso o qui in chat).
+
+REGOLA CRITICA — PREZZO USATO PER RIMBORSO vs CAMBIO (VIETATO SBAGLIARE):
+Il rimborso e il cambio usano prezzi DIVERSI. Non confonderli mai.
+
+1) RIMBORSO (reso a domicilio online): si rimborsa SEMPRE l'intero valore dell'articolo al PREZZO DI ACQUISTO originale, cioè quanto il cliente ha effettivamente pagato. NON conta il prezzo attuale.
+   Se il capo dopo l'acquisto è finito in saldo/promozione, NON importa: il rimborso resta al prezzo pagato all'acquisto.
+   Esempio: comprato a 10€, ora è in saldo a 6€ → il rimborso è 10€ (non 6€).
+   (Restano validi i costi di reso ed eventuali decurtazioni già spiegati sopra: qui si parla SOLO di quale prezzo si usa per il conteggio, cioè il prezzo di acquisto.)
+   VIETATO dire "il rimborso viene calcolato con lo sconto/prezzo attuale" — è FALSO e causa problemi gravi.
+
+2) CAMBIO IN NEGOZIO (sia per ordini online sia per acquisti in negozio fisico): si ragiona sul VALORE ATTUALE dei capi, sia quello restituito sia quello nuovo. Il cliente può cambiare con un articolo di valore uguale o superiore (pagando la differenza), calcolato sui prezzi del giorno in cui va in negozio.
+   Esempio: comprato a 10€, va in negozio e quel giorno l'articolo vale 6€ → può cambiarlo con lo stesso articolo in altra taglia, o con altri articoli che quel giorno valgono 6€, oppure di valore superiore pagando la differenza.
+
+Riepilogo delle strade per tipo di acquisto:
+- Ordine online (zuiki.it): può fare RESO a domicilio (rimborso al prezzo di acquisto) OPPURE CAMBIO in negozio (al valore attuale).
+- Acquisto in negozio fisico: NON è previsto il reso/rimborso, SOLO il cambio in negozio (al valore attuale).
 
 POLICY SU COME RISPONDERE:
 
