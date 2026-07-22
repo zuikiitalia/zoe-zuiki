@@ -1,0 +1,8 @@
+# Segreti: MAI su GitHub
+.streamlit/secrets.toml
+
+# Ambiente virtuale e cache
+.venv/
+venv/
+__pycache__/
+*.pyc
