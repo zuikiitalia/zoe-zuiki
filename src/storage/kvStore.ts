@@ -154,3 +154,23 @@ export async function isHumanActive(kv: KVNamespace, phone: string): Promise<boo
 export async function clearHumanActive(kv: KVNamespace, phone: string): Promise<void> {
   await kv.delete(`human_active:${phone}`);
 }
+
+// === Blocklist permanente: utenti esclusi dall'uso di Zoe (gestione solo umana) ===
+// A differenza di human_active (TTL breve, ripristino automatico), il blocco è
+// permanente finché un operatore non lo rimuove dalla dashboard.
+// Chiave sulle ultime 10 cifre per essere robusti a +39 / 39 / formati vari.
+function blockKey(phone: string): string {
+  return `zoe_blocked:${phone.replace(/\D/g, '').slice(-10)}`;
+}
+
+export async function blockZoeUser(kv: KVNamespace, phone: string): Promise<void> {
+  await kv.put(blockKey(phone), String(Date.now()));
+}
+
+export async function isZoeBlocked(kv: KVNamespace, phone: string): Promise<boolean> {
+  return (await kv.get(blockKey(phone))) !== null;
+}
+
+export async function unblockZoeUser(kv: KVNamespace, phone: string): Promise<void> {
+  await kv.delete(blockKey(phone));
+}

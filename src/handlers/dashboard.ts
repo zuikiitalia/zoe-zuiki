@@ -346,6 +346,60 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     });
   }
 
+  // GET /dashboard/api/high-cost-users?threshold=10 — utenti che superano soglia €/giorno
+  if (path === '/high-cost-users') {
+    const threshold = Math.max(0, parseFloat(url.searchParams.get('threshold') ?? '10'));
+    const days = Math.min(parseInt(url.searchParams.get('days') ?? '30', 10), 90);
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    // Costo per (cliente, giorno). Il conv_id inizia con phone_hash (16 hex) + '_' + ts.
+    // Aggreghiamo per phone_hash e giorno, escludendo la review notturna.
+    const rows = await c.env.ZOE_DB.prepare(`
+      SELECT
+        substr(a.conv_id, 1, 16) AS phone_hash,
+        date(a.ts/1000, 'unixepoch') AS day,
+        SUM(a.cost_usd) AS day_cost,
+        COUNT(*) AS calls,
+        (SELECT phone_full FROM conversations c2 WHERE c2.phone_hash = substr(a.conv_id,1,16) AND c2.phone_full IS NOT NULL ORDER BY c2.last_ts DESC LIMIT 1) AS phone_full
+      FROM api_calls a
+      WHERE a.ts >= ? AND a.conv_id NOT LIKE 'review_%'
+      GROUP BY phone_hash, day
+      HAVING day_cost >= ?
+      ORDER BY day_cost DESC
+    `).bind(sinceMs, threshold).all();
+    return c.json({ threshold, days, users: rows.results ?? [] });
+  }
+
+  // POST /dashboard/api/block-user {phone} — escludi utente da Zoe (gestione solo umana)
+  if (path === '/block-user') {
+    if (!c.env.ZOE_KV) return c.json({ error: 'no_kv' }, 503);
+    const body = await c.req.json<{ phone?: string }>().catch(() => ({} as { phone?: string }));
+    const phone = String(body.phone ?? '').trim();
+    if (!phone) return c.json({ error: 'missing_phone' }, 400);
+    const { blockZoeUser } = await import('../storage/kvStore');
+    await blockZoeUser(c.env.ZOE_KV, phone);
+    return c.json({ ok: true, phone, blocked: true });
+  }
+
+  // POST /dashboard/api/unblock-user {phone} — riattiva Zoe per l'utente
+  if (path === '/unblock-user') {
+    if (!c.env.ZOE_KV) return c.json({ error: 'no_kv' }, 503);
+    const body = await c.req.json<{ phone?: string }>().catch(() => ({} as { phone?: string }));
+    const phone = String(body.phone ?? '').trim();
+    if (!phone) return c.json({ error: 'missing_phone' }, 400);
+    const { unblockZoeUser } = await import('../storage/kvStore');
+    await unblockZoeUser(c.env.ZOE_KV, phone);
+    return c.json({ ok: true, phone, blocked: false });
+  }
+
+  // GET /dashboard/api/is-blocked?phone=... — stato blocco di un numero
+  if (path === '/is-blocked') {
+    if (!c.env.ZOE_KV) return c.json({ error: 'no_kv' }, 503);
+    const phone = url.searchParams.get('phone') ?? '';
+    if (!phone) return c.json({ error: 'missing_phone' }, 400);
+    const { isZoeBlocked } = await import('../storage/kvStore');
+    return c.json({ phone, blocked: await isZoeBlocked(c.env.ZOE_KV, phone) });
+  }
+
   // POST /dashboard/api/run-review — trigger manuale (utile per test)
   if (path === '/run-review') {
     if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: 'no_anthropic_key' }, 503);
@@ -446,6 +500,12 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
   </header>
   <main>
     <div class="cards" id="cards"></div>
+    <div class="panel" id="highcost-panel" style="border-left:4px solid #ef4444">
+      <h3>🚨 Alert costo elevato (oltre <span id="hc-threshold">10</span>€ in un giorno)
+        <button onclick="loadHighCostUsers()" style="float:right;font-size:12px;padding:4px 10px;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer">Aggiorna</button>
+      </h3>
+      <div id="highcost-result"><p style="color:#94a3b8;font-size:.84rem">Caricamento…</p></div>
+    </div>
     <div class="grid3" id="charts-row1">
       <div class="panel"><h3>Costo per modello AI</h3><div class="chart-wrap"><canvas id="ch-model"></canvas></div></div>
       <div class="panel"><h3>Sentiment</h3><div class="chart-wrap"><canvas id="ch-sentiment"></canvas></div></div>
@@ -883,6 +943,57 @@ async function loadImageSearches(){
 
 function toggleDet(el){const id=el.dataset.toggle;const d=document.getElementById(id);d.style.display=d.style.display==='block'?'none':'block';}
 
+const HC_THRESHOLD=10;
+function investigateFrom(el){document.getElementById('inv-phone').value=el.dataset.inv;runInvestigate();document.getElementById('investigate-panel').scrollIntoView();}
+async function loadHighCostUsers(){
+  const el=document.getElementById('highcost-result');
+  el.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/high-cost-users?threshold='+HC_THRESHOLD+'&days=30');
+  if(!data){el.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+  const users=data.users||[];
+  if(!users.length){el.innerHTML='<p style="color:#10b981;font-size:.84rem">✓ Nessun utente ha superato '+HC_THRESHOLD+'€ in un singolo giorno (ultimi 30 giorni).</p>';return;}
+  // Stato blocco per ciascun numero (in parallelo)
+  const blockStates=await Promise.all(users.map(u=>u.phone_full?api('/is-blocked?phone='+encodeURIComponent(u.phone_full)):Promise.resolve(null)));
+  el.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:.82rem">'+
+    '<thead><tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left;color:#991b1b">Cliente</th><th style="padding:6px 8px;text-align:left;color:#991b1b">Giorno</th><th style="padding:6px 8px;text-align:right;color:#991b1b">Costo</th><th style="padding:6px 8px;text-align:right;color:#991b1b">Chiamate</th><th style="padding:6px 8px;text-align:left;color:#991b1b">Stato</th><th style="padding:6px 8px;text-align:center;color:#991b1b">Azione</th></tr></thead><tbody>'+
+    users.map((u,i)=>{
+      const blocked=blockStates[i]&&blockStates[i].blocked;
+      const phone=u.phone_full||'';
+      const label=phone?'+'+phone:(u.phone_hash||'').slice(0,12)+'…';
+      const statusBadge=blocked
+        ?'<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600">🚫 ESCLUSO (gestione umana)</span>'
+        :'<span style="background:#dcfce7;color:#065f46;padding:2px 8px;border-radius:9999px;font-size:11px">Zoe attiva</span>';
+      const btn=!phone
+        ?'<span style="color:#94a3b8;font-size:11px">n/d</span>'
+        :blocked
+          ?'<button data-phone="'+phone+'" onclick="unblockUser(this)" style="padding:4px 10px;background:#10b981;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600">Riattiva Zoe</button>'
+          :'<button data-phone="'+phone+'" onclick="blockUser(this)" style="padding:4px 10px;background:#ef4444;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600">Escludi da Zoe</button>';
+      return '<tr style="border-bottom:1px solid #f3f4f6">'+
+        '<td style="padding:6px 8px">'+(phone?'<a href="#" data-inv="'+phone+'" onclick="investigateFrom(this);return false" style="color:#4f46e5">'+label+'</a>':label)+'</td>'+
+        '<td style="padding:6px 8px;font-family:monospace;font-size:11px">'+u.day+'</td>'+
+        '<td style="padding:6px 8px;text-align:right;font-weight:700;color:#ef4444">'+fmtCost(u.day_cost)+'</td>'+
+        '<td style="padding:6px 8px;text-align:right;color:#6b7280">'+u.calls+'</td>'+
+        '<td style="padding:6px 8px">'+statusBadge+'</td>'+
+        '<td style="padding:6px 8px;text-align:center">'+btn+'</td>'+
+      '</tr>';
+    }).join('')+'</tbody></table>';
+}
+
+async function blockUser(btn){
+  const phone=btn.dataset.phone;
+  if(!confirm('Escludere +'+phone+' da Zoe? Zoe smetterà di rispondere a questo numero e la conversazione andrà gestita da un operatore umano.'))return;
+  btn.disabled=true;btn.textContent='…';
+  const r=await api('/block-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+  if(r&&r.ok){loadHighCostUsers();}else{alert('Errore durante il blocco.');btn.disabled=false;btn.textContent='Escludi da Zoe';}
+}
+async function unblockUser(btn){
+  const phone=btn.dataset.phone;
+  if(!confirm('Riattivare Zoe per +'+phone+'?'))return;
+  btn.disabled=true;btn.textContent='…';
+  const r=await api('/unblock-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+  if(r&&r.ok){loadHighCostUsers();}else{alert('Errore.');btn.disabled=false;btn.textContent='Riattiva Zoe';}
+}
+
 async function loadCostBreakdown(){
   const el=document.getElementById('cost-breakdown-result');
   el.innerHTML='<div class="spinner">Caricamento…</div>';
@@ -949,6 +1060,7 @@ async function loadCostBreakdown(){
 initFilters();
 reload();
 loadCostBreakdown();
+loadHighCostUsers();
 </script>
 </body>
 </html>`;

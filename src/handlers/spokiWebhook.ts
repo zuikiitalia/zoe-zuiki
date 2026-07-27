@@ -12,6 +12,7 @@ import {
   markHumanActive,
   clearHumanActive,
   isOurOutboundEcho,
+  isZoeBlocked,
   type StoredMessage,
 } from '../storage/kvStore';
 import { processMessage } from '../orchestrator/claudeOrchestrator';
@@ -311,6 +312,12 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       return;
     }
     let { phone, text, images, contentType } = extracted;
+
+    // HARD BLOCK: utente escluso da Zoe tramite dashboard (gestione solo umana, permanente).
+    if (await isZoeBlocked(env.ZOE_KV, phone)) {
+      logger.info('zoe_blocked_hard_block', { content_type: contentType }, phone);
+      return;
+    }
 
     // HARD BLOCK: se un operatore umano ha preso la conversazione, Zoe non risponde mai.
     // Nessun hint, nessuna delega a Claude: blocco immediato e definitivo.
