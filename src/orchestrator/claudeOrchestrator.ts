@@ -35,12 +35,14 @@ import type { ApiCallData } from '../analytics/db';
 import { rerankCandidates } from '../clients/imageReranker';
 import type { RerankResult } from '../clients/imageReranker';
 
-const STORES_CDN_URL = 'https://cdn.shopify.com/s/files/1/0624/0642/6862/files/stores.json?v=1774869600';
+// Fonte dati negozi (telefono, maps, orari): store locator ufficiale su GitHub.
+// La ricerca disponibilità articoli in negozio (Siacloud) resta invariata e indipendente.
+const STORES_CDN_URL = 'https://raw.githubusercontent.com/simnun/zuiki-store-locator/main/Store_ZUIKI.json';
 
 interface CdnStore {
   r: string; p: string; n: string; t: string;
-  a: string; c: string; tel: number;
-  la: string; lo: string;
+  a: string; c: string; tel: string | number;
+  la: string | number; lo: string | number;
   hw: string; hs: string; hd: string;
   m: string;
 }
