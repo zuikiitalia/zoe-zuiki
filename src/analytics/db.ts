@@ -28,11 +28,15 @@ export interface ApiCallData {
 export interface ToolCallData {
   toolName: string;
   success: boolean;
+  inputJson?: string;
+  outputJson?: string;
+  durationMs?: number;
 }
 
 export interface ConversationUpdate {
   convId: string;
   phoneHash: string;
+  phoneFull?: string | null;
   firstTs: number;
   lastTs: number;
   userTurns: number;
@@ -50,10 +54,10 @@ export interface ConversationUpdate {
 export async function upsertConversation(db: D1Database, data: ConversationUpdate): Promise<void> {
   await db.prepare(`
     INSERT INTO conversations
-      (id, phone_hash, first_ts, last_ts, user_turns, assistant_turns,
+      (id, phone_hash, phone_full, first_ts, last_ts, user_turns, assistant_turns,
        total_input_tokens, total_output_tokens, total_cache_read_tokens, total_cost_usd,
        ticket_id, ticket_category, ticket_reason, ticket_urgency, updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET
       last_ts = excluded.last_ts,
       user_turns = excluded.user_turns,
@@ -62,13 +66,14 @@ export async function upsertConversation(db: D1Database, data: ConversationUpdat
       total_output_tokens = excluded.total_output_tokens,
       total_cache_read_tokens = excluded.total_cache_read_tokens,
       total_cost_usd = excluded.total_cost_usd,
+      phone_full = COALESCE(excluded.phone_full, conversations.phone_full),
       ticket_id = COALESCE(excluded.ticket_id, conversations.ticket_id),
       ticket_category = COALESCE(excluded.ticket_category, conversations.ticket_category),
       ticket_reason = COALESCE(excluded.ticket_reason, conversations.ticket_reason),
       ticket_urgency = COALESCE(excluded.ticket_urgency, conversations.ticket_urgency),
       updated_at = excluded.updated_at
   `).bind(
-    data.convId, data.phoneHash, data.firstTs, data.lastTs,
+    data.convId, data.phoneHash, data.phoneFull ?? null, data.firstTs, data.lastTs,
     data.userTurns, data.assistantTurns,
     data.totalInputTokens, data.totalOutputTokens, data.totalCacheReadTokens, data.totalCostUsd,
     data.ticketId ?? null, data.ticketCategory ?? null, data.ticketReason ?? null, data.ticketUrgency ?? null,
@@ -91,12 +96,28 @@ export async function insertApiCall(db: D1Database, convId: string, call: ApiCal
   ).run();
 }
 
+export async function insertThought(
+  db: D1Database,
+  convId: string,
+  iteration: number,
+  text: string
+): Promise<void> {
+  const id = `${convId}_thought_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  await db
+    .prepare(`INSERT OR IGNORE INTO assistant_thoughts (id, conv_id, ts, iteration, text) VALUES (?,?,?,?,?)`)
+    .bind(id, convId, Date.now(), iteration, text.slice(0, 8000))
+    .run();
+}
+
 export async function insertToolCall(db: D1Database, convId: string, call: ToolCallData): Promise<void> {
-  const id = `${convId}_${call.toolName}_${Date.now()}`;
+  const id = `${convId}_${call.toolName}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   await db.prepare(`
-    INSERT OR IGNORE INTO tool_calls (id, conv_id, ts, tool_name, success)
-    VALUES (?,?,?,?,?)
-  `).bind(id, convId, Date.now(), call.toolName, call.success ? 1 : 0).run();
+    INSERT OR IGNORE INTO tool_calls (id, conv_id, ts, tool_name, success, input_json, output_json, duration_ms)
+    VALUES (?,?,?,?,?,?,?,?)
+  `).bind(
+    id, convId, Date.now(), call.toolName, call.success ? 1 : 0,
+    call.inputJson ?? null, call.outputJson ?? null, call.durationMs ?? null
+  ).run();
 }
 
 // === Storia permanente messaggi (no scadenza) ===
@@ -136,6 +157,41 @@ export async function loadFullHistory(
     content: r.content,
     ts: r.ts,
   }));
+}
+
+export interface FashionClipSearchData {
+  source: string;
+  suffix?: string;
+  candidatesJson: string;
+  reranked: boolean;
+  rerankWinner?: string;
+  rerankConfidence?: number;
+  rerankReasoning?: string;
+  finalHandle?: string;
+  finalTitle?: string;
+  foundButOos: boolean;
+}
+
+export async function insertFashionClipSearch(
+  db: D1Database,
+  convId: string,
+  data: FashionClipSearchData
+): Promise<void> {
+  const id = `${convId}_fcs_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  await db.prepare(`
+    INSERT OR IGNORE INTO fashion_clip_searches
+      (id, conv_id, ts, source, suffix, candidates_json, reranked,
+       rerank_winner, rerank_confidence, rerank_reasoning, final_handle, final_title, found_but_oos)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).bind(
+    id, convId, Date.now(),
+    data.source, data.suffix ?? null,
+    data.candidatesJson,
+    data.reranked ? 1 : 0,
+    data.rerankWinner ?? null, data.rerankConfidence ?? null, data.rerankReasoning ?? null,
+    data.finalHandle ?? null, data.finalTitle ?? null,
+    data.foundButOos ? 1 : 0
+  ).run();
 }
 
 export async function updateSentiment(

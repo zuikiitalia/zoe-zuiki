@@ -11,13 +11,14 @@ import {
   getOrderByNameAndEmail,
   searchProducts,
   getProductByHandle,
+  getProductByHandleEnriched,
   ShopifyNotInstalledError,
 } from '../clients/shopifyClient';
 import { createSpokiTicket } from '../clients/spokiClient';
 import { getReturnByRMA } from '../clients/richreturnsClient';
 import { checkBarcodeAvailability } from '../clients/siacloudClient';
 import { checkAvailability } from '../clients/availabilityService';
-import { isBetaPhone } from '../utils/phone';
+import { isBetaPhone, isExperimentalPhone } from '../utils/phone';
 import { searchProductsBeta } from '../clients/shopifyClient';
 import { SIACLOUD_STORES } from '../data/siacloudStoreCodes';
 import {
@@ -29,15 +30,19 @@ import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
 import { markHumanActive } from '../storage/kvStore';
 import { getCategoryName } from '../data/skuSuffixes';
-import { insertApiCall, insertToolCall, upsertConversation } from '../analytics/db';
+import { insertApiCall, insertToolCall, insertThought, insertFashionClipSearch, upsertConversation } from '../analytics/db';
 import type { ApiCallData } from '../analytics/db';
+import { rerankCandidates } from '../clients/imageReranker';
+import type { RerankResult } from '../clients/imageReranker';
 
-const STORES_CDN_URL = 'https://cdn.shopify.com/s/files/1/0624/0642/6862/files/stores.json?v=1774869600';
+// Fonte dati negozi (telefono, maps, orari): store locator ufficiale su GitHub.
+// La ricerca disponibilità articoli in negozio (Siacloud) resta invariata e indipendente.
+const STORES_CDN_URL = 'https://raw.githubusercontent.com/simnun/zuiki-store-locator/main/Store_ZUIKI.json';
 
 interface CdnStore {
   r: string; p: string; n: string; t: string;
-  a: string; c: string; tel: number;
-  la: string; lo: string;
+  a: string; c: string; tel: string | number;
+  la: string | number; lo: string | number;
   hw: string; hs: string; hd: string;
   m: string;
 }
@@ -171,7 +176,9 @@ async function executeTool(
   input: Record<string, unknown>,
   clipEmbedding?: number[] | null,
   convId?: string,
-  beta = false
+  beta = false,
+  experimental = false,
+  userImage?: DownloadedImage | null
 ): Promise<string> {
   try {
     switch (name) {
@@ -377,18 +384,58 @@ async function executeTool(
           }
 
           if (embedding) {
-            const topK = beta ? 10 : 5;
-            const topMatches = await findSimilarProducts(
+            const topK = experimental ? 15 : ((beta) ? 10 : 5);
+            let topMatches = await findSimilarProducts(
               env,
               embedding,
               suffix || undefined,
               topK
             );
+
+            // Experimental: amplia il pool di candidati con una text-search Shopify
+            // sulla visual_description. FashionCLIP a volte non indicizza/ranka bene
+            // prodotti che invece sono ovvi per ricerca testuale.
+            if (experimental && visualDescription) {
+              try {
+                const qWords = visualDescription
+                  .split(/\s+/)
+                  .filter(w => w.length > 3)
+                  .slice(0, 5)
+                  .join(' ');
+                if (qWords) {
+                  const textRes = await searchProducts(env, qWords);
+                  const seenHandles = new Set(topMatches.map(m => m.handle));
+                  for (const p of textRes.products.slice(0, 10)) {
+                    if (seenHandles.has(p.handle)) continue;
+                    seenHandles.add(p.handle);
+                    topMatches.push({
+                      handle: p.handle,
+                      title: p.title,
+                      sku: '',
+                      sku_suffix: suffix || '',
+                      url: p.url ?? `https://www.zuiki.it/products/${p.handle}`,
+                      image_url: p.image ?? '',
+                      similarity: 0.5,
+                    });
+                  }
+                  logger.info('text_search_merge', {
+                    query: qWords,
+                    added: topMatches.length - topK,
+                    total: topMatches.length,
+                  }, phone);
+                }
+              } catch (e) {
+                logger.warn('text_search_merge_failed', { error: e instanceof Error ? e.message : String(e) }, phone);
+              }
+            }
+            // Limit finale a 25 per non esplodere il costo Sonnet (max 25 immagini).
+            topMatches = topMatches.slice(0, 25);
             logger.info('fashion_clip_search', {
               source,
               suffix: suffix || 'any',
               visual_description: visualDescription.slice(0, 120),
               count: topMatches.length,
+              experimental,
               top3: topMatches.slice(0, 3).map(m => ({
                 handle: m.handle,
                 score: Math.round(m.similarity * 1000) / 1000,
@@ -396,7 +443,212 @@ async function executeTool(
               })),
             }, phone);
 
+            // Snapshot dell'ordine originale Vectorize (prima del re-rank).
+            const originalTopMatches = [...topMatches];
+
+            // Experimental: Claude Sonnet 4.6 vision re-rank sui top candidati.
+            let rerankResult: RerankResult | null = null;
+            logger.info('rerank_gate', {
+              experimental,
+              has_user_image: !!userImage,
+              user_image_dim: userImage ? userImage.base64.length : 0,
+              candidates: topMatches.length,
+              will_call: experimental && !!userImage && topMatches.length > 1,
+            }, phone);
+            if (experimental && userImage && topMatches.length > 1) {
+              rerankResult = await rerankCandidates(
+                env,
+                userImage.base64,
+                userImage.mediaType,
+                topMatches,
+                phone
+              );
+              if (rerankResult) {
+                const winnerIdx = topMatches.findIndex(m => m.handle === rerankResult!.best_handle);
+                if (winnerIdx > 0) {
+                  const winner = topMatches.splice(winnerIdx, 1)[0]!;
+                  topMatches.unshift(winner);
+                }
+              }
+            }
+
+            // Quando il re-rank Sonnet ha confermato/scelto un match con alta confidence,
+            // la similarity di Vectorize sottostima la qualità reale (FashionCLIP ignora la texture).
+            // Usiamo max(vectorize, rerank_confidence*100) per evitare hedging inutile di Claude.
+            const similarityFor = (vectorSim: number): number => {
+              const base = Math.round(vectorSim * 100);
+              if (rerankResult && rerankResult.confidence >= 0.7) {
+                return Math.max(base, Math.round(rerankResult.confidence * 100));
+              }
+              return base;
+            };
+
+            // Path experimental con rerank:
+            // committiamo sul winner anche se OOS — un cardigan in viscosa "disponibile"
+            // ma sbagliato è peggio di un traforato corretto ma esaurito.
+            // In più estraiamo varianti disponibili (altri colori/taglie dello stesso modello)
+            // e alternative simili in-stock dai top-K rerankati.
+            if (experimental && rerankResult && rerankResult.confidence >= 0.5 && topMatches.length > 0) {
+              // Usa il prodotto scelto da Sonnet (best_handle), non necessariamente il top-1 Vectorize.
+              const winnerMatch = topMatches.find(m => m.handle === rerankResult!.best_handle) ?? topMatches[0]!;
+              const winner = winnerMatch;
+              try {
+                const detail = await getProductByHandleEnriched(env, winner.handle);
+                const totalInv = detail.total_inventory ?? 0;
+                const inStockVariants = (detail.variants ?? []).filter(v => v.available);
+
+                const colorKey = (opts: Record<string, string>) =>
+                  opts['Colore'] ?? opts['Color'] ?? opts['colore'] ?? '';
+                const sizeKey = (opts: Record<string, string>) =>
+                  opts['Taglia'] ?? opts['Size'] ?? opts['taglia'] ?? '';
+
+                const availableColors = Array.from(new Set(
+                  inStockVariants.map(v => colorKey(v.options)).filter(Boolean)
+                ));
+                // Raggruppa varianti disponibili per colore → { "Nero": ["S","M"], "Blu": ["L"] }
+                // così Claude può rispondere "c'è in Nero S, M e Blu L" senza ulteriore parsing.
+                const variantsByColor: Record<string, string[]> = {};
+                for (const v of inStockVariants) {
+                  const c = colorKey(v.options) || '(unico)';
+                  const s = sizeKey(v.options);
+                  if (!variantsByColor[c]) variantsByColor[c] = [];
+                  if (s && !variantsByColor[c].includes(s)) variantsByColor[c].push(s);
+                }
+                const availableVariants = inStockVariants.map(v => {
+                  const colore = colorKey(v.options);
+                  const taglia = sizeKey(v.options);
+                  return { color: colore, size: taglia, inventory: v.inventory };
+                });
+
+                // Alternative scelte da Sonnet (rerankResult.alternatives), filtrate per in-stock.
+                // Le alternative di Sonnet sono già ordinate per similarità visiva al photo,
+                // quindi non rischiamo più di proporre una viscosa quando il cliente vuole un traforato.
+                const similarAlternatives: Array<{ title: string; url: string; similarity_percent: number; reasoning?: string }> = [];
+                const altCandidates = rerankResult.alternatives.length > 0
+                  ? rerankResult.alternatives
+                      .map(a => {
+                        const m = topMatches.find(tm => tm.handle === a.handle);
+                        return m ? { match: m, sonnetSimilarity: a.similarity, sonnetReasoning: a.reasoning } : null;
+                      })
+                      .filter((x): x is NonNullable<typeof x> => x !== null)
+                  : topMatches.slice(1, 8).map(m => ({ match: m, sonnetSimilarity: m.similarity, sonnetReasoning: '' }));
+                for (const cand of altCandidates) {
+                  if (similarAlternatives.length >= 3) break;
+                  try {
+                    const d = await getProductByHandle(env, cand.match.handle);
+                    if ((d.total_inventory ?? 0) > 0) {
+                      similarAlternatives.push({
+                        title: cand.match.title,
+                        url: cand.match.url,
+                        similarity_percent: Math.round(cand.sonnetSimilarity * 100),
+                        reasoning: cand.sonnetReasoning || undefined,
+                      });
+                    }
+                  } catch { /* skip */ }
+                }
+
+                matchResult = {
+                  sku: winner.sku,
+                  title: winner.title,
+                  url: winner.url,
+                  image_url: winner.image_url,
+                  category: getCategoryName(winner.sku_suffix),
+                  similarity_percent: similarityFor(winner.similarity),
+                };
+                const finalHandleEarly = winner.handle;
+
+                if (env.ZOE_DB && convId) {
+                  insertFashionClipSearch(env.ZOE_DB, convId, {
+                    source,
+                    suffix: suffix || undefined,
+                    candidatesJson: JSON.stringify(
+                      originalTopMatches.slice(0, 10).map(m => ({
+                        handle: m.handle,
+                        title: m.title.slice(0, 80),
+                        similarity: Math.round(m.similarity * 1000) / 1000,
+                      }))
+                    ),
+                    reranked: true,
+                    rerankWinner: rerankResult.best_handle,
+                    rerankConfidence: rerankResult.confidence,
+                    rerankReasoning: rerankResult.reasoning,
+                    finalHandle: finalHandleEarly,
+                    finalTitle: matchResult.title,
+                    foundButOos: totalInv === 0,
+                  }).catch(() => {});
+                }
+
+                return JSON.stringify({
+                  match: matchResult,
+                  winner_in_stock: totalInv > 0,
+                  available_colors: availableColors,
+                  variants_by_color: variantsByColor,
+                  available_variants: availableVariants.slice(0, 30),
+                  similar_alternatives: similarAlternatives.length > 0 ? similarAlternatives : undefined,
+                  found_but_all_oos: totalInv === 0,
+                  rerank_applied: true,
+                  rerank_confidence: Math.round(rerankResult.confidence * 100),
+                  search_url: searchUrl,
+                  search_keywords: keywords,
+                  visual_search_available: true,
+                  hint_for_zoe: 'Se winner_in_stock=true ma il colore richiesto manca da variants_by_color, dì che il modello c\'è ma non in quel colore, elenca i colori disponibili con le rispettive taglie da variants_by_color, e chiedi se vuole un altro colore o un modello simile (similar_alternatives). Se found_but_all_oos=true, dì che il modello è esaurito e proponi similar_alternatives.',
+                });
+              } catch (err) {
+                logger.warn('experimental_winner_detail_failed', {
+                  handle: winner.handle,
+                  error: err instanceof Error ? err.message : String(err),
+                }, phone);
+                // Fall through al path normale sotto.
+              }
+            }
+
+            // Fallback experimental: reranker assente/low-confidence, ma c'era un'immagine utente.
+            // NON usare la loop disponibilità (che prende il primo in-stock ignorando la texture):
+            // restituisci il top-1 Vectorize mostrando correttamente se è OOS.
+            if (experimental && userImage && !matchResult && topMatches.length > 0) {
+              const top = topMatches[0]!;
+              let topInv = 0;
+              try {
+                const topDetail = await getProductByHandle(env, top.handle);
+                topInv = topDetail.total_inventory ?? 0;
+              } catch { /* assume unavailable */ }
+              matchResult = {
+                sku: top.sku,
+                title: top.title,
+                url: top.url,
+                image_url: top.image_url,
+                category: getCategoryName(top.sku_suffix),
+                similarity_percent: similarityFor(top.similarity),
+              };
+              if (env.ZOE_DB && convId) {
+                insertFashionClipSearch(env.ZOE_DB, convId, {
+                  source,
+                  suffix: suffix || undefined,
+                  candidatesJson: JSON.stringify(
+                    originalTopMatches.slice(0, 10).map(m => ({
+                      handle: m.handle,
+                      title: m.title.slice(0, 80),
+                      similarity: Math.round(m.similarity * 1000) / 1000,
+                    }))
+                  ),
+                  reranked: false,
+                  finalHandle: top.handle,
+                  finalTitle: top.title,
+                  foundButOos: topInv === 0,
+                }).catch(() => {});
+              }
+              return JSON.stringify({
+                match: matchResult,
+                found_but_all_oos: topInv === 0,
+                rerank_applied: false,
+                search_url: searchUrl,
+                search_keywords: keywords,
+                visual_search_available: true,
+              });
+            }
+
             // Scegli il primo match con disponibilità > 0
+            let finalHandle: string | null = null;
             for (const match of topMatches) {
               try {
                 const detail = await getProductByHandle(env, match.handle);
@@ -407,30 +659,55 @@ async function executeTool(
                   available: hasStock,
                 }, phone);
                 if (!hasStock) continue;
+                finalHandle = match.handle;
                 matchResult = {
                   sku: match.sku,
                   title: match.title,
                   url: match.url,
                   image_url: match.image_url,
                   category: getCategoryName(match.sku_suffix),
-                  similarity_percent: Math.round(match.similarity * 100),
+                  similarity_percent: similarityFor(match.similarity),
                 };
                 break;
               } catch {
+                finalHandle = match.handle;
                 matchResult = {
                   sku: match.sku,
                   title: match.title,
                   url: match.url,
                   image_url: match.image_url,
                   category: getCategoryName(match.sku_suffix),
-                  similarity_percent: Math.round(match.similarity * 100),
+                  similarity_percent: similarityFor(match.similarity),
                 };
                 break;
               }
             }
 
-            // Beta I4: se nessun match disponibile, ritorna comunque il top-1 con flag
-            if (beta && !matchResult && topMatches.length > 0) {
+            // Salva diagnostica ricerca immagine nel DB (solo experimental).
+            if (experimental && env.ZOE_DB && convId) {
+              const oosFlag = (beta || experimental) && !matchResult && topMatches.length > 0;
+              insertFashionClipSearch(env.ZOE_DB, convId, {
+                source,
+                suffix: suffix || undefined,
+                candidatesJson: JSON.stringify(
+                  originalTopMatches.slice(0, 10).map(m => ({
+                    handle: m.handle,
+                    title: m.title.slice(0, 80),
+                    similarity: Math.round(m.similarity * 1000) / 1000,
+                  }))
+                ),
+                reranked: !!rerankResult,
+                rerankWinner: rerankResult?.best_handle,
+                rerankConfidence: rerankResult?.confidence,
+                rerankReasoning: rerankResult?.reasoning,
+                finalHandle: finalHandle ?? topMatches[0]?.handle ?? undefined,
+                finalTitle: matchResult?.title ?? topMatches[0]?.title ?? undefined,
+                foundButOos: oosFlag,
+              }).catch(() => {});
+            }
+
+            // Beta/Experimental I4: se nessun match disponibile, ritorna comunque il top-1 con flag
+            if ((beta || experimental) && !matchResult && topMatches.length > 0) {
               const top = topMatches[0]!;
               matchResult = {
                 sku: top.sku,
@@ -446,6 +723,7 @@ async function executeTool(
                 search_url: searchUrl,
                 search_keywords: keywords,
                 visual_search_available: true,
+                rerank_applied: experimental && !!rerankResult,
               });
             }
           }
@@ -457,6 +735,7 @@ async function executeTool(
           search_keywords: keywords,
           visual_search_available: !!env.HF_SPACE_URL && !!env.PRODUCT_VECTORS,
         });
+
       }
       case 'get_return_status': {
         const rma = String(input.rma_number ?? '').trim();
@@ -704,6 +983,7 @@ export async function processMessage(
 ): Promise<string[]> {
   const anthropic = anthropicClient ?? new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const beta = isBetaPhone(phone, env.BETA_PHONES);
+  const experimental = isExperimentalPhone(phone, env.EXPERIMENTAL_PHONES);
 
   // Scarica immagini una sola volta (per Claude content e FashionCLIP embedding).
   const downloadedImages = images.length > 0 ? await downloadImages(images, phone) : [];
@@ -825,6 +1105,15 @@ export async function processMessage(
         break;
       }
       messages.push({ role: 'assistant', content: response.content });
+      // Cattura il "pensiero" di Claude (text block emesso insieme alle tool_use)
+      // per poter ricostruire il ragionamento nella tab investigazione.
+      if (env.ZOE_DB && convId) {
+        for (const block of response.content) {
+          if (block.type === 'text' && block.text.trim()) {
+            insertThought(env.ZOE_DB, convId, iterations, block.text).catch(() => {});
+          }
+        }
+      }
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const block of response.content) {
         if (block.type === 'tool_use') {
@@ -833,10 +1122,22 @@ export async function processMessage(
             { tool: block.name, input: block.input },
             phone
           );
-          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId, beta);
-          // Traccia tool call nel DB analytics.
+          const tStart = Date.now();
+          const result = await executeTool(env, phone, block.name, block.input as Record<string, unknown>, clipEmbedding, convId, beta, experimental, firstImage);
+          const duration = Date.now() - tStart;
+          // Traccia tool call nel DB analytics, con input e output (troncato a 8KB).
           if (env.ZOE_DB && convId) {
-            insertToolCall(env.ZOE_DB, convId, { toolName: block.name, success: true }).catch(() => {});
+            const inputJson = (() => {
+              try { return JSON.stringify(block.input).slice(0, 4000); } catch { return null; }
+            })();
+            const outputJson = typeof result === 'string' ? result.slice(0, 8000) : JSON.stringify(result).slice(0, 8000);
+            insertToolCall(env.ZOE_DB, convId, {
+              toolName: block.name,
+              success: true,
+              inputJson: inputJson ?? undefined,
+              outputJson,
+              durationMs: duration,
+            }).catch(() => {});
           }
           toolResults.push({
             type: 'tool_result',

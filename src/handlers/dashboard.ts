@@ -1,5 +1,6 @@
 import type { Context } from 'hono';
 import type { Env } from '../config';
+import { phoneHash } from '../analytics/db';
 
 // Helper per verificare auth
 function checkAuth(c: Context<{ Bindings: Env }>): boolean {
@@ -17,7 +18,6 @@ function tsToDateRange(from: string | null, to: string | null): { fromMs: number
 }
 
 export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise<Response> {
-  if (!checkAuth(c)) return c.json({ error: 'unauthorized' }, 401);
   if (!c.env.ZOE_DB) return c.json({ error: 'no_db' }, 503);
 
   const url = new URL(c.req.url);
@@ -98,6 +98,7 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     const rows = await c.env.ZOE_DB.prepare(`
       SELECT
         phone_hash,
+        (SELECT phone_full FROM conversations c3 WHERE c3.phone_hash=conversations.phone_hash AND c3.phone_full IS NOT NULL ORDER BY c3.last_ts DESC LIMIT 1) AS phone_full,
         COUNT(*) AS sessions,
         SUM(user_turns) AS total_user_turns,
         SUM(assistant_turns) AS total_assistant_turns,
@@ -214,6 +215,191 @@ export async function handleDashboardAPI(c: Context<{ Bindings: Env }>): Promise
     return c.json({ findings: findings.results, summary: summary.results });
   }
 
+  // GET /dashboard/api/investigate?phone=... — lookup full trace per numero
+  if (path === '/investigate') {
+    const phoneParam = url.searchParams.get('phone') ?? '';
+    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '3', 10), 20);
+    if (!phoneParam) return c.json({ error: 'missing phone' }, 400);
+
+    // Spoki/storia possono aver salvato l'hash di diverse forme del numero (+39…, 39…, 10 cifre).
+    // Proviamo tutte le varianti plausibili finché non troviamo conversazioni.
+    const digits = phoneParam.replace(/\D/g, '');
+    const last10 = digits.length >= 10 ? digits.slice(-10) : digits;
+    const with39 = last10.length === 10 ? '39' + last10 : digits;
+    const variants = Array.from(new Set([
+      digits,            // 393920057593
+      last10,            // 3920057593
+      with39,            // 393920057593 (idempotente)
+      '+' + with39,      // +393920057593  ← formato Spoki più comune
+      '+' + digits,
+    ]));
+    const hashes = await Promise.all(variants.map(v => phoneHash(v)));
+
+    let ph = '';
+    let convs: { results?: Record<string, unknown>[] } = { results: [] };
+    for (const candidate of hashes) {
+      const r = await c.env.ZOE_DB
+        .prepare('SELECT * FROM conversations WHERE phone_hash = ? ORDER BY first_ts DESC LIMIT ?')
+        .bind(candidate, limit)
+        .all();
+      if ((r.results ?? []).length > 0) {
+        ph = candidate;
+        convs = r;
+        break;
+      }
+    }
+    if (!ph) ph = hashes[0]!;
+    const conversations = [];
+    for (const conv of convs.results ?? []) {
+      const convId = conv.id as string;
+      const firstTs = conv.first_ts as number;
+      const lastTs = conv.last_ts as number;
+      const [msgs, tools, apis, thoughts] = await Promise.all([
+        c.env.ZOE_DB.prepare(
+          'SELECT role, content, ts FROM messages WHERE phone_hash = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC'
+        ).bind(ph, firstTs, lastTs + 120_000).all(),
+        c.env.ZOE_DB.prepare(
+          'SELECT ts, tool_name, success, input_json, output_json, duration_ms FROM tool_calls WHERE conv_id = ? ORDER BY ts ASC'
+        ).bind(convId).all(),
+        c.env.ZOE_DB.prepare(
+          'SELECT ts, model, input_tokens, output_tokens, cache_read_tokens, latency_ms, iteration, stop_reason, cost_usd FROM api_calls WHERE conv_id = ? ORDER BY ts ASC'
+        ).bind(convId).all(),
+        c.env.ZOE_DB.prepare(
+          'SELECT ts, iteration, text FROM assistant_thoughts WHERE conv_id = ? ORDER BY ts ASC'
+        ).bind(convId).all(),
+      ]);
+      conversations.push({
+        ...conv,
+        messages: msgs.results ?? [],
+        tool_calls: tools.results ?? [],
+        api_calls: apis.results ?? [],
+        thoughts: thoughts.results ?? [],
+      });
+    }
+    return c.json({ phone_hash: ph, conversations });
+  }
+
+  // GET /dashboard/api/image-searches?from=&to=&limit= — ricerche immagini sperimentali
+  if (path === '/image-searches') {
+    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 200);
+    const rows = await c.env.ZOE_DB.prepare(`
+      SELECT f.id, f.conv_id, f.ts, f.source, f.suffix, f.candidates_json,
+             f.reranked, f.rerank_winner, f.rerank_confidence, f.rerank_reasoning,
+             f.final_handle, f.final_title, f.found_but_oos
+      FROM fashion_clip_searches f
+      WHERE f.ts >= ? AND f.ts <= ?
+      ORDER BY f.ts DESC LIMIT ?
+    `).bind(fromMs, toMs, limit).all();
+    return c.json({ searches: rows.results ?? [] });
+  }
+
+  // GET /dashboard/api/cost-by-source — costi per giorno + sorgente (conversazioni vs review)
+  if (path === '/cost-by-source') {
+    const days = Math.min(parseInt(url.searchParams.get('days') ?? '30', 10), 90);
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    const [byDay, topConvs, perConv] = await Promise.all([
+      // Costo per giorno e sorgente
+      c.env.ZOE_DB.prepare(`
+        SELECT
+          date(ts/1000, 'unixepoch') AS day,
+          CASE WHEN conv_id LIKE 'review_%' THEN 'review' ELSE 'conversation' END AS source,
+          SUM(cost_usd) AS cost,
+          COUNT(*) AS calls,
+          SUM(input_tokens) AS input_tokens,
+          SUM(output_tokens) AS output_tokens,
+          SUM(cache_read_tokens) AS cache_read_tokens
+        FROM api_calls
+        WHERE ts >= ?
+        GROUP BY day, source
+        ORDER BY day DESC
+      `).bind(sinceMs).all(),
+      // Top 10 conversazioni più costose
+      c.env.ZOE_DB.prepare(`
+        SELECT a.conv_id, SUM(a.cost_usd) AS total_cost,
+               COUNT(*) AS calls, SUM(a.input_tokens) AS input_tokens,
+               c.phone_full, c.first_ts
+        FROM api_calls a
+        LEFT JOIN conversations c ON c.id = a.conv_id
+        WHERE a.ts >= ? AND a.conv_id NOT LIKE 'review_%'
+        GROUP BY a.conv_id
+        ORDER BY total_cost DESC LIMIT 10
+      `).bind(sinceMs).all(),
+      // Statistiche per conversazione
+      c.env.ZOE_DB.prepare(`
+        SELECT
+          AVG(s.cost) AS avg_cost,
+          MAX(s.cost) AS max_cost,
+          SUM(s.cost) AS total_cost,
+          COUNT(*) AS conv_count
+        FROM (
+          SELECT conv_id, SUM(cost_usd) AS cost
+          FROM api_calls
+          WHERE ts >= ? AND conv_id NOT LIKE 'review_%'
+          GROUP BY conv_id
+        ) s
+      `).bind(sinceMs).first(),
+    ]);
+    return c.json({
+      by_day: byDay.results ?? [],
+      top_conversations: topConvs.results ?? [],
+      per_conv_stats: perConv,
+    });
+  }
+
+  // GET /dashboard/api/high-cost-users?threshold=10 — utenti che superano soglia €/giorno
+  if (path === '/high-cost-users') {
+    const threshold = Math.max(0, parseFloat(url.searchParams.get('threshold') ?? '10'));
+    const days = Math.min(parseInt(url.searchParams.get('days') ?? '30', 10), 90);
+    const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+    // Costo per (cliente, giorno). Il conv_id inizia con phone_hash (16 hex) + '_' + ts.
+    // Aggreghiamo per phone_hash e giorno, escludendo la review notturna.
+    const rows = await c.env.ZOE_DB.prepare(`
+      SELECT
+        substr(a.conv_id, 1, 16) AS phone_hash,
+        date(a.ts/1000, 'unixepoch') AS day,
+        SUM(a.cost_usd) AS day_cost,
+        COUNT(*) AS calls,
+        (SELECT phone_full FROM conversations c2 WHERE c2.phone_hash = substr(a.conv_id,1,16) AND c2.phone_full IS NOT NULL ORDER BY c2.last_ts DESC LIMIT 1) AS phone_full
+      FROM api_calls a
+      WHERE a.ts >= ? AND a.conv_id NOT LIKE 'review_%'
+      GROUP BY phone_hash, day
+      HAVING day_cost >= ?
+      ORDER BY day_cost DESC
+    `).bind(sinceMs, threshold).all();
+    return c.json({ threshold, days, users: rows.results ?? [] });
+  }
+
+  // POST /dashboard/api/block-user {phone} — escludi utente da Zoe (gestione solo umana)
+  if (path === '/block-user') {
+    if (!c.env.ZOE_KV) return c.json({ error: 'no_kv' }, 503);
+    const body = await c.req.json<{ phone?: string }>().catch(() => ({} as { phone?: string }));
+    const phone = String(body.phone ?? '').trim();
+    if (!phone) return c.json({ error: 'missing_phone' }, 400);
+    const { blockZoeUser } = await import('../storage/kvStore');
+    await blockZoeUser(c.env.ZOE_KV, phone);
+    return c.json({ ok: true, phone, blocked: true });
+  }
+
+  // POST /dashboard/api/unblock-user {phone} — riattiva Zoe per l'utente
+  if (path === '/unblock-user') {
+    if (!c.env.ZOE_KV) return c.json({ error: 'no_kv' }, 503);
+    const body = await c.req.json<{ phone?: string }>().catch(() => ({} as { phone?: string }));
+    const phone = String(body.phone ?? '').trim();
+    if (!phone) return c.json({ error: 'missing_phone' }, 400);
+    const { unblockZoeUser } = await import('../storage/kvStore');
+    await unblockZoeUser(c.env.ZOE_KV, phone);
+    return c.json({ ok: true, phone, blocked: false });
+  }
+
+  // GET /dashboard/api/is-blocked?phone=... — stato blocco di un numero
+  if (path === '/is-blocked') {
+    if (!c.env.ZOE_KV) return c.json({ error: 'no_kv' }, 503);
+    const phone = url.searchParams.get('phone') ?? '';
+    if (!phone) return c.json({ error: 'missing_phone' }, 400);
+    const { isZoeBlocked } = await import('../storage/kvStore');
+    return c.json({ phone, blocked: await isZoeBlocked(c.env.ZOE_KV, phone) });
+  }
+
   // POST /dashboard/api/run-review — trigger manuale (utile per test)
   if (path === '/run-review') {
     if (!c.env.ANTHROPIC_API_KEY) return c.json({ error: 'no_anthropic_key' }, 503);
@@ -236,14 +422,7 @@ export function handleDashboardHTML(_c: Context<{ Bindings: Env }>): Response {
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f0f2f5;color:#1a1a2e;min-height:100vh}
-#login{display:flex;align-items:center;justify-content:center;min-height:100vh}
-#login-box{background:#fff;border-radius:12px;padding:40px;width:320px;box-shadow:0 4px 20px rgba(0,0,0,.1)}
-#login-box h2{margin-bottom:20px;color:#4f46e5;font-size:1.4rem}
-#login-box input{width:100%;padding:10px 14px;border:1px solid #d1d5db;border-radius:8px;font-size:.95rem;margin-bottom:12px}
-#login-box button{width:100%;padding:11px;background:#4f46e5;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:.95rem;font-weight:600}
-#login-box button:hover{background:#4338ca}
-#login-err{color:#ef4444;font-size:.85rem;margin-top:8px;display:none}
-#app{display:none}
+#app{display:block}
 header{background:#4f46e5;color:#fff;padding:16px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 header h1{font-size:1.2rem;font-weight:700}
 .filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto}
@@ -305,15 +484,6 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
 </head>
 <body>
 
-<div id="login">
-  <div id="login-box">
-    <h2>🤖 Zoe Dashboard</h2>
-    <input type="password" id="pwd" placeholder="Password" autocomplete="current-password"/>
-    <button onclick="doLogin()">Accedi</button>
-    <div id="login-err">Password non valida.</div>
-  </div>
-</div>
-
 <div id="app">
   <header>
     <h1>Zoe Analytics</h1>
@@ -330,6 +500,12 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
   </header>
   <main>
     <div class="cards" id="cards"></div>
+    <div class="panel" id="highcost-panel" style="border-left:4px solid #ef4444">
+      <h3>🚨 Alert costo elevato (oltre <span id="hc-threshold">10</span>€ in un giorno)
+        <button onclick="loadHighCostUsers()" style="float:right;font-size:12px;padding:4px 10px;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer">Aggiorna</button>
+      </h3>
+      <div id="highcost-result"><p style="color:#94a3b8;font-size:.84rem">Caricamento…</p></div>
+    </div>
     <div class="grid3" id="charts-row1">
       <div class="panel"><h3>Costo per modello AI</h3><div class="chart-wrap"><canvas id="ch-model"></canvas></div></div>
       <div class="panel"><h3>Sentiment</h3><div class="chart-wrap"><canvas id="ch-sentiment"></canvas></div></div>
@@ -338,6 +514,28 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
     <div class="grid2" id="charts-row2">
       <div class="panel"><h3>Token per modello</h3><div class="chart-wrap"><canvas id="ch-tokens"></canvas></div></div>
       <div class="panel"><h3>Tool più usati</h3><div class="chart-wrap"><canvas id="ch-tools"></canvas></div></div>
+    </div>
+    <div class="panel" id="cost-breakdown-panel">
+      <h3>💸 Costi per sorgente <button onclick="loadCostBreakdown()" style="float:right;font-size:12px;padding:4px 10px;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer">Aggiorna</button></h3>
+      <div id="cost-breakdown-result"><p style="color:#94a3b8;font-size:.84rem">Caricamento…</p></div>
+    </div>
+    <div class="panel" id="investigate-panel">
+      <h3>🔬 Indaga conversazione per numero</h3>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+        <input type="text" id="inv-phone" placeholder="es. 3334443334 o +393334443334" style="flex:1;min-width:220px;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:.9rem"/>
+        <select id="inv-limit" style="padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:.9rem">
+          <option value="1">Ultima</option>
+          <option value="3" selected>Ultime 3</option>
+          <option value="10">Ultime 10</option>
+          <option value="20">Ultime 20</option>
+        </select>
+        <button onclick="runInvestigate()" style="padding:8px 18px;background:#4f46e5;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600">Cerca</button>
+      </div>
+      <div id="inv-result"></div>
+    </div>
+    <div class="panel" id="imgsearch-panel">
+      <h3>🔍 Ricerche immagini sperimentali <button onclick="loadImageSearches()" style="float:right;font-size:12px;padding:4px 10px;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer">Aggiorna</button></h3>
+      <div id="imgsearch-result"><p style="color:#94a3b8;font-size:.84rem">Clicca "Aggiorna" per caricare.</p></div>
     </div>
     <div class="panel" id="findings-panel">
       <h3>🔎 Review qualità (ultimi 30 giorni) <button id="run-review-btn" onclick="runReview()" style="float:right;font-size:12px">Esegui ora</button></h3>
@@ -354,7 +552,7 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
       <div id="conv-spinner" class="spinner">Caricamento…</div>
       <table id="conv-table" style="display:none">
         <thead><tr>
-          <th>Cliente</th><th>Prima/Ultima</th><th>Sessioni</th><th>Turni tot.</th><th>Ticket</th><th>Sentiment ultimo</th>
+          <th>Telefono</th><th>Prima/Ultima</th><th>Sessioni</th><th>Turni tot.</th><th>Ticket</th><th>Sentiment ultimo</th>
         </tr></thead>
         <tbody id="conv-tbody"></tbody>
       </table>
@@ -376,7 +574,6 @@ tbody td{padding:8px 10px;border-bottom:1px solid #f3f4f6;color:#374151}
 </div>
 
 <script>
-let SECRET = '';
 let chartModel=null, chartSentiment=null, chartTicket=null, chartTokens=null, chartTools=null;
 let convPage=0, convTotal=0;
 const LIMIT=50;
@@ -389,25 +586,10 @@ function fmtCost(n){ return n!=null ? '$'+Number(n).toFixed(4) : '$0.0000'; }
 function dur(a,b){ const m=Math.round((b-a)/60000); if(m<1)return '<1 min'; if(m<60)return m+' min'; return Math.round(m/60)+'h '+m%60+'m'; }
 
 async function api(path,opts){
-  const r=await fetch('/dashboard/api'+path,Object.assign({headers:{Authorization:'Bearer '+SECRET}},opts||{}));
-  if(r.status===401){logout();return null;}
-  return r.json();
+  const r=await fetch('/dashboard/api'+path,opts||{});
+  if(!r.ok){const txt=await r.text().catch(()=>'');console.error('API error',r.status,txt.slice(0,200));return null;}
+  try{return await r.json();}catch(e){console.error('API json parse error',e);return null;}
 }
-
-function doLogin(){
-  SECRET=document.getElementById('pwd').value.trim();
-  api('/summary?from='+daysAgo(30)+'&to='+today()).then(data=>{
-    if(!data||data.error){document.getElementById('login-err').style.display='block';SECRET='';return;}
-    document.getElementById('login').style.display='none';
-    document.getElementById('app').style.display='block';
-    sessionStorage.setItem('dash_secret',SECRET);
-    initFilters();
-    reload();
-  });
-}
-document.getElementById('pwd').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
-
-function logout(){SECRET='';sessionStorage.removeItem('dash_secret');document.getElementById('login').style.display='flex';document.getElementById('app').style.display='none';}
 
 function initFilters(){
   document.getElementById('f-from').value=daysAgo(30);
@@ -550,7 +732,7 @@ function renderConvTable(d){
   convTotal=d.total||0;
   const tbody=document.getElementById('conv-tbody');
   tbody.innerHTML=rows.map(r=>\`<tr class="conv-row" onclick="openConv('\${r.latest_conv_id}')">
-    <td style="font-family:monospace;font-size:12px">\${(r.phone_hash||'').slice(0,12)}…</td>
+    <td style="font-family:monospace;font-size:12px">\${r.phone_full ? '+'+r.phone_full : (r.phone_hash||'').slice(0,12)+'…'}</td>
     <td>\${fmt(r.first_seen)}<br><span style="color:#94a3b8;font-size:11px">\${fmt(r.last_seen)}</span></td>
     <td>\${r.sessions||0}</td>
     <td>\${r.total_user_turns||0}u / \${r.total_assistant_turns||0}a</td>
@@ -606,7 +788,7 @@ async function openConv(id){
 
   document.getElementById('modal-content').innerHTML=\`
     <dl class="meta-grid">
-      <dt>Cliente (hash)</dt><dd style="font-family:monospace">\${c.phone_hash}</dd>
+      <dt>Cliente</dt><dd style="font-family:monospace">\${c.phone_full ? '+'+c.phone_full : ''} <span style="color:#94a3b8;font-size:11px">\${c.phone_hash}</span></dd>
       <dt>Sessione corrente</dt><dd>\${fmt(c.first_ts)} → \${fmt(c.last_ts)}</dd>
       <dt>Tutte le sessioni</dt><dd>\${sessions.length} con questo cliente</dd>
       <dt>Sentiment ultimo</dt><dd><span class="badge badge-\${c.sentiment||'unknown'}">\${c.sentiment||'?'}</span> \${c.sentiment_note||''}</dd>
@@ -639,12 +821,246 @@ async function openConv(id){
   \`;
 }
 
+const TOOL_ICONS={search_products:'🔍',get_product_by_handle:'📦',check_availability:'🏬',check_store_availability:'🏪',find_similar_product:'✨',get_order_by_name_and_email:'🧾',open_support_ticket:'🎫',get_return_by_rma:'↩️',search_stores:'🗺️',get_store_details:'📍'};
+
+function fmtTime(ts){return new Date(ts).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit',second:'2-digit'});}
+
+async function runInvestigate(){
+  const phone=document.getElementById('inv-phone').value.trim();
+  const limit=document.getElementById('inv-limit').value;
+  const res=document.getElementById('inv-result');
+  if(!phone){res.innerHTML='<p style="color:#ef4444">Inserisci un numero.</p>';return;}
+  res.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/investigate?phone='+encodeURIComponent(phone)+'&limit='+limit);
+  if(!data){res.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+  const convs=data.conversations||[];
+  if(!convs.length){res.innerHTML='<p style="color:#94a3b8">Nessuna conversazione trovata per questo numero. (hash provato: '+data.phone_hash+')<br>Prova con/senza prefisso 39.</p>';return;}
+  res.innerHTML=convs.map(c=>renderInvConv(c)).join('');
+}
+
+function renderInvConv(c){
+  const events=[];
+  (c.messages||[]).forEach(m=>events.push({ts:m.ts,type:'msg',role:m.role,content:m.content}));
+  (c.tool_calls||[]).forEach(t=>events.push({ts:t.ts,type:'tool',name:t.tool_name,success:!!t.success,input_json:t.input_json,output_json:t.output_json,duration_ms:t.duration_ms}));
+  (c.api_calls||[]).forEach(a=>events.push({ts:a.ts,type:'api',...a}));
+  (c.thoughts||[]).forEach(th=>events.push({ts:th.ts,type:'thought',iteration:th.iteration,text:th.text}));
+  events.sort((a,b)=>a.ts-b.ts);
+  const timeline=events.map(e=>{
+    const t=fmtTime(e.ts);
+    if(e.type==='msg'){
+      const isUser=e.role==='user';
+      const who=isUser?'👤 Cliente':'🤖 Zoe';
+      const bg=isUser?'#fff':'#dcfce7';
+      const border=isUser?'#e5e7eb':'#bbf7d0';
+      const align=isUser?'left':'right';
+      const raw=e.content||'';
+      const long=raw.length>240;
+      const escFull=raw.replace(/</g,'&lt;').replace(/\\n/g,'<br>');
+      const escShort=raw.slice(0,240).replace(/</g,'&lt;').replace(/\\n/g,'<br>')+'…';
+      const mid='m-'+Math.random().toString(36).slice(2,9);
+      const body=long
+        ? '<div id="'+mid+'-s" style="font-size:13px;margin-top:3px">'+escShort+' <a href="#" onclick="document.getElementById(\\''+mid+'-s\\').style.display=\\'none\\';document.getElementById(\\''+mid+'-f\\').style.display=\\'block\\';return false" style="color:#4f46e5;font-size:11px">[espandi]</a></div><div id="'+mid+'-f" style="display:none;font-size:13px;margin-top:3px">'+escFull+' <a href="#" onclick="document.getElementById(\\''+mid+'-f\\').style.display=\\'none\\';document.getElementById(\\''+mid+'-s\\').style.display=\\'block\\';return false" style="color:#4f46e5;font-size:11px">[riduci]</a></div>'
+        : '<div style="font-size:13px;margin-top:3px">'+escFull+'</div>';
+      return '<div style="margin:8px 0;text-align:'+align+'"><div style="display:inline-block;max-width:80%;background:'+bg+';border:1px solid '+border+';border-radius:8px;padding:8px 12px;text-align:left"><div style="font-size:11px;color:#64748b;font-weight:600">'+who+' · '+t+'</div>'+body+'</div></div>';
+    }
+    if(e.type==='tool'){
+      const icon=TOOL_ICONS[e.name]||'🔧';
+      const status=e.success?'<span style="color:#10b981">✓</span>':'<span style="color:#ef4444">✗</span>';
+      const dur=e.duration_ms?' <span style="color:#94a3b8">'+e.duration_ms+'ms</span>':'';
+      let inputSummary='';
+      if(e.input_json){
+        try{
+          const inp=JSON.parse(e.input_json);
+          inputSummary=' <span style="color:#4f46e5">'+Object.entries(inp).map(([k,v])=>k+'='+JSON.stringify(v).slice(0,60)).join(' ')+'</span>';
+        }catch{ inputSummary=' '+e.input_json.slice(0,120); }
+      }
+      const detailId='td-'+Math.random().toString(36).slice(2,9);
+      const hasDetails=e.input_json||e.output_json;
+      const expander=hasDetails?'<a href="#" onclick="document.getElementById(\\''+detailId+'\\').style.display=document.getElementById(\\''+detailId+'\\').style.display===\\'block\\'?\\'none\\':\\'block\\';return false" style="color:#4f46e5;font-size:11px;margin-left:8px">[dettagli]</a>':'';
+      const details=hasDetails?'<div id="'+detailId+'" style="display:none;margin:4px 0 4px 24px;padding:8px 10px;background:#1e293b;color:#e2e8f0;border-radius:6px;font-size:11px;font-family:monospace;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow:auto"><div style="color:#94a3b8;margin-bottom:4px">INPUT:</div>'+(e.input_json||'(nessuno)').replace(/</g,'&lt;')+'<div style="color:#94a3b8;margin:8px 0 4px">OUTPUT:</div>'+(e.output_json||'(nessuno)').replace(/</g,'&lt;')+'</div>':'';
+      return '<div style="font-size:12px;color:#475569;padding:2px 0;font-family:monospace">  ['+t+'] '+icon+' '+status+' <b>'+e.name+'</b>'+inputSummary+dur+expander+'</div>'+details;
+    }
+    if(e.type==='thought'){
+      const tid='th-'+Math.random().toString(36).slice(2,9);
+      const preview=(e.text||'').slice(0,80).replace(/</g,'&lt;').replace(/\\n/g,' ');
+      const full=(e.text||'').replace(/</g,'&lt;').replace(/\\n/g,'<br>');
+      const more=(e.text||'').length>80?' …':'';
+      return '<div style="font-size:12px;color:#7c3aed;padding:3px 0;font-family:monospace">  ['+t+'] 💭 <i>'+preview+more+'</i> <a href="#" onclick="document.getElementById(\\''+tid+'\\').style.display=document.getElementById(\\''+tid+'\\').style.display===\\'block\\'?\\'none\\':\\'block\\';return false" style="color:#4f46e5;font-size:11px">[mostra]</a></div>'+
+        '<div id="'+tid+'" style="display:none;margin:4px 0 4px 24px;padding:10px 12px;background:#f5f3ff;border-left:3px solid #7c3aed;border-radius:4px;font-size:13px;color:#4c1d95;font-family:inherit;line-height:1.4">'+full+'</div>';
+    }
+    const cost=e.cost_usd!=null?'$'+Number(e.cost_usd).toFixed(4):'';
+    return '<div style="font-size:11px;color:#94a3b8;padding:1px 0;font-family:monospace">  ['+t+'] 🧠 iter='+e.iteration+' in='+e.input_tokens+' out='+e.output_tokens+' cache='+e.cache_read_tokens+' '+e.latency_ms+'ms '+e.stop_reason+' '+cost+'</div>';
+  }).join('');
+  const meta='<div style="font-weight:700;font-size:.9rem;color:#1a1a2e;margin-bottom:6px">'+fmt(c.first_ts)+' → '+fmt(c.last_ts)+'</div>'+
+    '<div style="font-size:.8rem;color:#6b7280;margin-bottom:10px">'+
+    (c.user_turns||0)+'u / '+(c.assistant_turns||0)+'a · '+
+    (c.total_cost_usd?fmtCost(c.total_cost_usd):'$0')+' · '+
+    (c.ticket_id?'<span class="badge badge-ticket">'+c.ticket_id+' '+(c.ticket_category||'')+'</span>':'no ticket')+' · '+
+    '<span class="badge badge-'+(c.sentiment||'unknown')+'">'+(c.sentiment||'?')+'</span>'+
+    '</div>';
+  return '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:14px;margin-bottom:14px;background:#f8fafc">'+meta+timeline+'</div>';
+}
+
 function closeModal(){document.getElementById('conv-modal').classList.remove('open');}
 document.getElementById('conv-modal').addEventListener('click',e=>{if(e.target===document.getElementById('conv-modal'))closeModal();});
 
-// Auto-login da sessionStorage
-const saved=sessionStorage.getItem('dash_secret');
-if(saved){SECRET=saved;document.getElementById('pwd').value=saved;doLogin();}
+document.getElementById('inv-phone').addEventListener('keydown',e=>{if(e.key==='Enter')runInvestigate();});
+
+async function loadImageSearches(){
+
+  const {from,to}=getFilters();
+  const el=document.getElementById('imgsearch-result');
+  el.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/image-searches?from='+from+'&to='+to+'&limit=50');
+  if(!data){el.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+  const rows=data.searches||[];
+  if(!rows.length){el.innerHTML='<p style="color:#94a3b8;font-size:.84rem">Nessuna ricerca immagine nel periodo selezionato.</p>';return;}
+  el.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:.79rem"><thead><tr style="background:#f9fafb"><th style="padding:6px 8px;text-align:left;color:#6b7280">Ora</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Sorgente</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Top-1 Vectorize</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Re-rank</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Risultato finale</th><th style="padding:6px 8px;text-align:left;color:#6b7280">Conv</th></tr></thead><tbody>'+
+  rows.map(r=>{
+    let candidates=[];
+    try{candidates=JSON.parse(r.candidates_json||'[]');}catch{}
+    const top1=candidates[0]||{};
+    const rerankBadge=r.reranked
+      ?'<span style="background:#d1fae5;color:#065f46;padding:2px 7px;border-radius:4px;font-size:11px">✓ '+Math.round((r.rerank_confidence||0)*100)+'%</span>'
+      :'<span style="color:#94a3b8;font-size:11px">—</span>';
+    const rerankChanged=r.reranked&&r.rerank_winner&&r.rerank_winner!==top1.handle;
+    const rerankNote=rerankChanged?'<br><span style="color:#f59e0b;font-size:10px">⚡ cambiato da '+top1.handle+'</span>':'';
+    const oosBadge=r.found_but_oos?'<span style="background:#fee2e2;color:#991b1b;padding:2px 7px;border-radius:4px;font-size:11px;margin-left:4px">OOS</span>':'';
+    const detId='fcs-'+Math.random().toString(36).slice(2,8);
+    const candidateList=candidates.slice(0,5).map((c,i)=>'<div style="font-size:10px;color:#64748b">'+(i+1)+'. '+c.handle+' ('+Math.round((c.similarity||0)*100)+'%)</div>').join('');
+    return '<tr style="border-bottom:1px solid #f3f4f6">'+
+      '<td style="padding:5px 8px;font-size:11px;color:#64748b">'+fmtTime(r.ts)+'</td>'+
+      '<td style="padding:5px 8px"><span style="background:#ede9fe;color:#4f46e5;padding:2px 6px;border-radius:4px;font-size:11px">'+(r.source||'?')+(r.suffix?' ('+r.suffix+')':'')+'</span></td>'+
+      '<td style="padding:5px 8px"><span style="font-size:12px">'+top1.handle+'</span><span style="color:#94a3b8;font-size:10px;margin-left:4px">'+(top1.similarity?Math.round(top1.similarity*100)+'%':'')+'</span>'+
+        '<a href="#" data-toggle="'+detId+'" onclick="toggleDet(this);return false" style="color:#4f46e5;font-size:10px;margin-left:6px">[tutti]</a>'+
+        '<div id="'+detId+'" style="display:none">'+candidateList+'</div></td>'+
+      '<td style="padding:5px 8px">'+rerankBadge+(r.rerank_reasoning?'<br><span style="font-size:10px;color:#475569">'+r.rerank_reasoning.slice(0,80).replace(/</g,'&lt;')+'</span>':'')+'</td>'+
+      '<td style="padding:5px 8px"><span style="font-size:12px">'+(r.final_handle||'—')+'</span>'+rerankNote+oosBadge+'<br><span style="font-size:10px;color:#94a3b8">'+(r.final_title||'').slice(0,40).replace(/</g,'&lt;')+'</span></td>'+
+      '<td style="padding:5px 8px"><a href="#" data-conv="'+r.conv_id+'" onclick="openConv(this.dataset.conv);return false" style="color:#4f46e5;font-size:11px">apri</a></td>'+
+    '</tr>';
+  }).join('')+'</tbody></table>';
+}
+
+function toggleDet(el){const id=el.dataset.toggle;const d=document.getElementById(id);d.style.display=d.style.display==='block'?'none':'block';}
+
+const HC_THRESHOLD=10;
+function investigateFrom(el){document.getElementById('inv-phone').value=el.dataset.inv;runInvestigate();document.getElementById('investigate-panel').scrollIntoView();}
+async function loadHighCostUsers(){
+  const el=document.getElementById('highcost-result');
+  el.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/high-cost-users?threshold='+HC_THRESHOLD+'&days=30');
+  if(!data){el.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+  const users=data.users||[];
+  if(!users.length){el.innerHTML='<p style="color:#10b981;font-size:.84rem">✓ Nessun utente ha superato '+HC_THRESHOLD+'€ in un singolo giorno (ultimi 30 giorni).</p>';return;}
+  // Stato blocco per ciascun numero (in parallelo)
+  const blockStates=await Promise.all(users.map(u=>u.phone_full?api('/is-blocked?phone='+encodeURIComponent(u.phone_full)):Promise.resolve(null)));
+  el.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:.82rem">'+
+    '<thead><tr style="background:#fef2f2"><th style="padding:6px 8px;text-align:left;color:#991b1b">Cliente</th><th style="padding:6px 8px;text-align:left;color:#991b1b">Giorno</th><th style="padding:6px 8px;text-align:right;color:#991b1b">Costo</th><th style="padding:6px 8px;text-align:right;color:#991b1b">Chiamate</th><th style="padding:6px 8px;text-align:left;color:#991b1b">Stato</th><th style="padding:6px 8px;text-align:center;color:#991b1b">Azione</th></tr></thead><tbody>'+
+    users.map((u,i)=>{
+      const blocked=blockStates[i]&&blockStates[i].blocked;
+      const phone=u.phone_full||'';
+      const label=phone?'+'+phone:(u.phone_hash||'').slice(0,12)+'…';
+      const statusBadge=blocked
+        ?'<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600">🚫 ESCLUSO (gestione umana)</span>'
+        :'<span style="background:#dcfce7;color:#065f46;padding:2px 8px;border-radius:9999px;font-size:11px">Zoe attiva</span>';
+      const btn=!phone
+        ?'<span style="color:#94a3b8;font-size:11px">n/d</span>'
+        :blocked
+          ?'<button data-phone="'+phone+'" onclick="unblockUser(this)" style="padding:4px 10px;background:#10b981;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600">Riattiva Zoe</button>'
+          :'<button data-phone="'+phone+'" onclick="blockUser(this)" style="padding:4px 10px;background:#ef4444;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600">Escludi da Zoe</button>';
+      return '<tr style="border-bottom:1px solid #f3f4f6">'+
+        '<td style="padding:6px 8px">'+(phone?'<a href="#" data-inv="'+phone+'" onclick="investigateFrom(this);return false" style="color:#4f46e5">'+label+'</a>':label)+'</td>'+
+        '<td style="padding:6px 8px;font-family:monospace;font-size:11px">'+u.day+'</td>'+
+        '<td style="padding:6px 8px;text-align:right;font-weight:700;color:#ef4444">'+fmtCost(u.day_cost)+'</td>'+
+        '<td style="padding:6px 8px;text-align:right;color:#6b7280">'+u.calls+'</td>'+
+        '<td style="padding:6px 8px">'+statusBadge+'</td>'+
+        '<td style="padding:6px 8px;text-align:center">'+btn+'</td>'+
+      '</tr>';
+    }).join('')+'</tbody></table>';
+}
+
+async function blockUser(btn){
+  const phone=btn.dataset.phone;
+  if(!confirm('Escludere +'+phone+' da Zoe? Zoe smetterà di rispondere a questo numero e la conversazione andrà gestita da un operatore umano.'))return;
+  btn.disabled=true;btn.textContent='…';
+  const r=await api('/block-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+  if(r&&r.ok){loadHighCostUsers();}else{alert('Errore durante il blocco.');btn.disabled=false;btn.textContent='Escludi da Zoe';}
+}
+async function unblockUser(btn){
+  const phone=btn.dataset.phone;
+  if(!confirm('Riattivare Zoe per +'+phone+'?'))return;
+  btn.disabled=true;btn.textContent='…';
+  const r=await api('/unblock-user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+  if(r&&r.ok){loadHighCostUsers();}else{alert('Errore.');btn.disabled=false;btn.textContent='Riattiva Zoe';}
+}
+
+async function loadCostBreakdown(){
+  const el=document.getElementById('cost-breakdown-result');
+  el.innerHTML='<div class="spinner">Caricamento…</div>';
+  const data=await api('/cost-by-source?days=30');
+  if(!data){el.innerHTML='<p style="color:#ef4444">Errore.</p>';return;}
+
+  const byDay=data.by_day||[];
+  const topConvs=data.top_conversations||[];
+  const stats=data.per_conv_stats||{};
+
+  // Aggrega per giorno (conv + review separati)
+  const dayMap={};
+  byDay.forEach(r=>{
+    if(!dayMap[r.day])dayMap[r.day]={day:r.day,conversation:0,review:0};
+    dayMap[r.day][r.source]=(dayMap[r.day][r.source]||0)+(+r.cost||0);
+  });
+  const days=Object.values(dayMap).sort((a,b)=>a.day<b.day?-1:1);
+
+  // Totali
+  const totConv=byDay.filter(r=>r.source==='conversation').reduce((s,r)=>s+(+r.cost||0),0);
+  const totRev=byDay.filter(r=>r.source==='review').reduce((s,r)=>s+(+r.cost||0),0);
+
+  // Giorno più costoso
+  const maxDay=days.reduce((m,d)=>((d.conversation+d.review)>(m.conversation+m.review)?d:m),{day:'—',conversation:0,review:0});
+
+  el.innerHTML=\`
+  <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Conv (30gg)</div><div class="value" style="font-size:1.3rem">\${fmtCost(totConv)}</div><div class="sub">\${stats.conv_count||0} conv, media \${fmtCost(stats.avg_cost||0)}</div></div>
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Review notturna (30gg)</div><div class="value" style="font-size:1.3rem">\${fmtCost(totRev)}</div><div class="sub">Opus analisi qualità</div></div>
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Giorno più caro</div><div class="value" style="font-size:1.1rem">\${maxDay.day}</div><div class="sub">\${fmtCost((maxDay.conversation||0)+(maxDay.review||0))}</div></div>
+    <div class="card" style="flex:1;min-width:140px"><div class="label">Conv più cara</div><div class="value" style="font-size:1.1rem">\${fmtCost(stats.max_cost||0)}</div><div class="sub">singola conversazione</div></div>
+  </div>
+  <div style="margin-bottom:14px">
+    <div style="font-size:.8rem;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Costo per giorno (ultime 30gg)</div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.8rem">
+      <thead><tr style="background:#f9fafb"><th style="padding:5px 8px;text-align:left;color:#6b7280">Giorno</th><th style="padding:5px 8px;text-align:right;color:#4f46e5">Conversazioni</th><th style="padding:5px 8px;text-align:right;color:#7c3aed">Review</th><th style="padding:5px 8px;text-align:right;color:#374151">Totale</th></tr></thead>
+      <tbody>\${days.slice().reverse().map(d=>{
+        const tot=(d.conversation||0)+(d.review||0);
+        const barW=Math.round((tot/((maxDay.conversation||0)+(maxDay.review||0)))*100);
+        return '<tr style="border-bottom:1px solid #f3f4f6">'+
+          '<td style="padding:4px 8px;font-family:monospace;font-size:11px">'+d.day+'</td>'+
+          '<td style="padding:4px 8px;text-align:right;color:#4f46e5">'+fmtCost(d.conversation||0)+'</td>'+
+          '<td style="padding:4px 8px;text-align:right;color:#7c3aed">'+fmtCost(d.review||0)+'</td>'+
+          '<td style="padding:4px 8px;text-align:right;font-weight:600"><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end"><div style="height:6px;background:#4f46e5;border-radius:3px;width:'+barW+'px;min-width:2px;max-width:80px"></div>'+fmtCost(tot)+'</div></td>'+
+        '</tr>';
+      }).join('')}</tbody>
+    </table></div>
+  </div>
+  \${topConvs.length?
+  '<div><div style="font-size:.8rem;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px">Top 10 conversazioni più costose</div>'+
+  '<table style="width:100%;border-collapse:collapse;font-size:.8rem">'+
+  '<thead><tr style="background:#f9fafb"><th style="padding:5px 8px;text-align:left;color:#6b7280">Cliente</th><th style="padding:5px 8px;text-align:right;color:#6b7280">Costo</th><th style="padding:5px 8px;text-align:right;color:#6b7280">Chiamate</th><th style="padding:5px 8px;text-align:right;color:#6b7280">Token in</th><th style="padding:5px 8px;text-align:left;color:#6b7280">Data</th></tr></thead>'+
+  '<tbody>'+topConvs.map(c=>'<tr style="border-bottom:1px solid #f3f4f6">'+
+    '<td style="padding:4px 8px"><a href="#" data-conv="'+c.conv_id+'" onclick="openConv(this.dataset.conv);return false" style="color:#4f46e5;font-size:11px">'+(c.phone_full?'+'+c.phone_full:c.conv_id.slice(0,16)+'…')+'</a></td>'+
+    '<td style="padding:4px 8px;text-align:right;font-weight:600;color:#ef4444">'+fmtCost(c.total_cost)+'</td>'+
+    '<td style="padding:4px 8px;text-align:right;color:#6b7280">'+c.calls+'</td>'+
+    '<td style="padding:4px 8px;text-align:right;color:#6b7280">'+fmtNum(c.input_tokens)+'</td>'+
+    '<td style="padding:4px 8px;font-size:11px;color:#94a3b8">'+fmt(c.first_ts)+'</td>'+
+  '</tr>').join('')+
+  '</tbody></table></div>'
+  :''}\`;
+}
+
+initFilters();
+reload();
+loadCostBreakdown();
+loadHighCostUsers();
 </script>
 </body>
 </html>`;

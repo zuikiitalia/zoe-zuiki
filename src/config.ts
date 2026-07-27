@@ -18,6 +18,10 @@ export interface Env {
   ZOE_DB?: D1Database;
   // Password per accedere alla dashboard (Bearer token).
   DASHBOARD_SECRET?: string;
+  // Chiave segreta per l'endpoint /api/investigate (debug conversazioni).
+  INVESTIGATE_KEY?: string;
+  // Numeri abilitati alle feature sperimentali (comma-separated, es. "3920057593,393920057593").
+  EXPERIMENTAL_PHONES?: string;
   // RichReturns API key — se non configurata, Zoe usa il comportamento statico per i resi.
   RICHRETURNS_API_KEY?: string;
 }
@@ -33,6 +37,9 @@ export const RATE_LIMIT_TTL_SECONDS = 60 * 60;
 export const RATE_LIMIT_MAX_PER_HOUR = 30;
 export const MAX_TOOL_ITERATIONS = 5;
 export const INTER_MESSAGE_DELAY_MS = 800;
+// Finestra di debounce per i messaggi concatenati: attende N ms di silenzio dal
+// cliente prima di rispondere, così i messaggi spezzati vengono uniti in un solo turno.
+export const MSG_DEBOUNCE_WINDOW_MS = 6000;
 export const SHOPIFY_API_VERSION = '2025-01';
 export const SHOPIFY_OAUTH_SCOPES =
   'read_orders,read_all_orders,read_customers,read_products,read_inventory,read_fulfillments,read_draft_orders';

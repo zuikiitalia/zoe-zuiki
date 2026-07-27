@@ -1,6 +1,6 @@
 import type { Context } from 'hono';
 import type { Env } from '../config';
-import { INTER_MESSAGE_DELAY_MS, MAX_CLAUDE_HISTORY_MESSAGES } from '../config';
+import { INTER_MESSAGE_DELAY_MS, MAX_CLAUDE_HISTORY_MESSAGES, MSG_DEBOUNCE_WINDOW_MS } from '../config';
 import { verifySpokiWebhook } from '../utils/security';
 import { logger } from '../utils/logger';
 import { normalizePhone } from '../utils/phone';
@@ -12,6 +12,10 @@ import {
   markHumanActive,
   clearHumanActive,
   isOurOutboundEcho,
+  isZoeBlocked,
+  appendMessageBuffer,
+  getMessageBuffer,
+  clearMessageBuffer,
   type StoredMessage,
 } from '../storage/kvStore';
 import { processMessage } from '../orchestrator/claudeOrchestrator';
@@ -312,6 +316,12 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
     }
     let { phone, text, images, contentType } = extracted;
 
+    // HARD BLOCK: utente escluso da Zoe tramite dashboard (gestione solo umana, permanente).
+    if (await isZoeBlocked(env.ZOE_KV, phone)) {
+      logger.info('zoe_blocked_hard_block', { content_type: contentType }, phone);
+      return;
+    }
+
     // HARD BLOCK: se un operatore umano ha preso la conversazione, Zoe non risponde mai.
     // Nessun hint, nessuna delega a Claude: blocco immediato e definitivo.
     const humanActive = await isHumanActive(env.ZOE_KV, phone);
@@ -366,6 +376,29 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       logger.warn('rate_limited', {}, phone);
       return;
     }
+
+    // DEBOUNCE MESSAGGI CONCATENATI: alcuni clienti spezzano un unico concetto in più
+    // messaggi ravvicinati. Accodiamo il messaggio e aspettiamo una finestra di silenzio;
+    // solo l'ultima invocazione del burst elabora l'insieme, gli altri escono qui.
+    const myToken = await appendMessageBuffer(env.ZOE_KV, phone, {
+      text, images, ts: Date.now(),
+    });
+    await new Promise((res) => setTimeout(res, MSG_DEBOUNCE_WINDOW_MS));
+    const buffer = await getMessageBuffer(env.ZOE_KV, phone);
+    if (buffer && buffer.lastTs !== myToken) {
+      // È arrivato un altro messaggio durante la finestra: lascia elaborare a quello.
+      logger.info('debounce_superseded', { buffered: buffer.items.length }, phone);
+      return;
+    }
+    // Siamo l'ultima invocazione del burst: uniamo tutti i messaggi in un solo turno.
+    if (buffer && buffer.items.length > 1) {
+      const combinedText = buffer.items.map((m) => m.text).filter(Boolean).join('\n');
+      const combinedImages = buffer.items.flatMap((m) => m.images);
+      logger.info('debounce_combined', { parts: buffer.items.length, chars: combinedText.length, images: combinedImages.length }, phone);
+      text = combinedText || text;
+      images = combinedImages;
+    }
+    await clearMessageBuffer(env.ZOE_KV, phone);
 
     // Carichiamo l'intera storia con il cliente da D1 (permanente, no scadenza).
     // KV come fallback se D1 non disponibile.
@@ -484,6 +517,7 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         await upsertConversation(env.ZOE_DB, {
           convId,
           phoneHash: pHash,
+          phoneFull: normalizePhone(phone),
           firstTs,
           lastTs: now,
           userTurns,
