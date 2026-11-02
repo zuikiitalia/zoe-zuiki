@@ -81,6 +81,24 @@ export async function upsertConversation(db: D1Database, data: ConversationUpdat
   ).run();
 }
 
+// Crea la riga della conversazione se non esiste ancora (non tocca quelle esistenti).
+// Va chiamata PRIMA di registrare api_calls / tool_calls / assistant_thoughts: quelle
+// tabelle hanno una FOREIGN KEY verso conversations e D1 la applica, quindi senza la riga
+// gli inserimenti fallivano in silenzio (es. tutto il primo turno di ogni cliente nuovo).
+export async function ensureConversation(
+  db: D1Database,
+  convId: string,
+  phoneHashStr: string,
+  phoneFull: string | null,
+  firstTs: number,
+): Promise<void> {
+  const now = Date.now();
+  await db.prepare(`
+    INSERT OR IGNORE INTO conversations (id, phone_hash, phone_full, first_ts, last_ts, updated_at)
+    VALUES (?,?,?,?,?,?)
+  `).bind(convId, phoneHashStr, phoneFull, firstTs, now, now).run();
+}
+
 export async function insertApiCall(db: D1Database, convId: string, call: ApiCallData): Promise<void> {
   const cost = computeCostUsd(call.model, call.inputTokens, call.outputTokens, call.cacheReadTokens, call.cacheCreationTokens);
   const id = `${convId}_${Date.now()}_${call.iteration}`;

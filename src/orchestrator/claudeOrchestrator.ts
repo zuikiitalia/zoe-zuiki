@@ -1027,6 +1027,9 @@ export async function processMessage(
   let iterations = 0;
   let finalText = '';
   let exhausted = false;
+  // Scritture analytics del turno: le attendiamo tutte prima di rispondere, altrimenti
+  // quelle ancora in volo a fine turno potevano perdersi quando il Worker chiudeva.
+  const pendingWrites: Promise<unknown>[] = [];
 
   // Chiama l'API Anthropic con retry su errori transitori (429, 529, 503).
   // Timeout 25s per evitare che il Worker resti appeso se Anthropic è lento.
@@ -1103,7 +1106,7 @@ export async function processMessage(
         iteration: iterations,
         stopReason: response.stop_reason ?? '',
       };
-      insertApiCall(env.ZOE_DB, convId, callData).catch(() => {});
+      pendingWrites.push(insertApiCall(env.ZOE_DB, convId, callData).catch((e) => logger.error('d1_api_call_failed', { error: String(e) }, phone)));
     }
 
     if (response.stop_reason === 'tool_use') {
@@ -1117,7 +1120,7 @@ export async function processMessage(
       if (env.ZOE_DB && convId) {
         for (const block of response.content) {
           if (block.type === 'text' && block.text.trim()) {
-            insertThought(env.ZOE_DB, convId, iterations, block.text).catch(() => {});
+            pendingWrites.push(insertThought(env.ZOE_DB, convId, iterations, block.text).catch(() => {}));
           }
         }
       }
@@ -1138,13 +1141,13 @@ export async function processMessage(
               try { return JSON.stringify(block.input).slice(0, 4000); } catch { return null; }
             })();
             const outputJson = typeof result === 'string' ? result.slice(0, 8000) : JSON.stringify(result).slice(0, 8000);
-            insertToolCall(env.ZOE_DB, convId, {
+            pendingWrites.push(insertToolCall(env.ZOE_DB, convId, {
               toolName: block.name,
               success: true,
               inputJson: inputJson ?? undefined,
               outputJson,
               durationMs: duration,
-            }).catch(() => {});
+            }).catch(() => {}));
           }
           toolResults.push({
             type: 'tool_result',
@@ -1165,6 +1168,8 @@ export async function processMessage(
       .trim();
     break;
   }
+
+  await Promise.allSettled(pendingWrites);
 
   if (exhausted) {
     logger.warn('tool_iterations_exceeded', {}, phone);

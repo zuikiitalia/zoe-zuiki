@@ -1,5 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
+import type { D1Database } from '@cloudflare/workers-types';
 import type { StoredMessage } from '../storage/kvStore';
+import { insertSystemApiCall } from './usage';
+
+const SENTIMENT_MODEL = 'claude-haiku-4-5-20251001';
 
 export interface SentimentResult {
   sentiment: 'satisfied' | 'partial' | 'unsatisfied' | 'unknown';
@@ -20,7 +24,9 @@ CONVERSAZIONE:
 
 export async function analyzeSentiment(
   apiKey: string,
-  messages: StoredMessage[]
+  messages: StoredMessage[],
+  db?: D1Database,
+  convId?: string,
 ): Promise<SentimentResult> {
   if (messages.length < 2) return { sentiment: 'unknown', note: 'conversazione troppo breve' };
 
@@ -30,11 +36,15 @@ export async function analyzeSentiment(
 
   const anthropic = new Anthropic({ apiKey });
   try {
+    const t0 = Date.now();
     const res = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: SENTIMENT_MODEL,
       max_tokens: 80,
       messages: [{ role: 'user', content: PROMPT.replace('{CONV}', text) }],
     });
+    if (db) {
+      await insertSystemApiCall(db, 'sentiment', SENTIMENT_MODEL, res.usage, Date.now() - t0, convId).catch(() => {});
+    }
     const raw = res.content.find(b => b.type === 'text')?.text ?? '';
     const match = raw.match(/\{[\s\S]*\}/);
     if (!match) return { sentiment: 'unknown', note: 'parsing fallito' };

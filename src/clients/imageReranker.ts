@@ -2,8 +2,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Env } from '../config';
 import type { SimilarProductMatch } from './vectorizeClient';
 import { logger } from '../utils/logger';
+import { insertSystemApiCall } from '../analytics/usage';
 
-const RERANK_MODEL = 'claude-sonnet-4-6';
+const RERANK_MODEL = 'claude-sonnet-5-5';
 export const RERANK_CONFIDENCE_THRESHOLD = 0.3;
 // 25 candidati: abbastanza per coprire i top-K Vectorize + i risultati text-search
 // senza esplodere il costo per immagine (~$0.025/call con 25 immagini URL).
@@ -18,7 +19,7 @@ export interface RerankResult {
 }
 
 /**
- * Usa Claude Sonnet 4.6 vision per scegliere il miglior match tra i candidati Vectorize.
+ * Usa Claude Sonnet 5.5 vision per scegliere il miglior match tra i candidati Vectorize.
  * Ritorna null se la confidence è sotto soglia o se la chiamata fallisce.
  */
 export async function rerankCandidates(
@@ -84,14 +85,25 @@ CRITICAL: A lace/crochet/openwork garment is NOT visually similar to a smooth vi
   });
 
   try {
+    // Sonnet 5.5: thinking adaptive a effort basso + max_tokens più ampio (il thinking
+    // consuma dal budget, va lasciato spazio al JSON di output). Solo i text block vengono
+    // letti sotto, quindi gli eventuali blocchi thinking non interferiscono col parse.
+    // Cast: l'SDK 0.91 non tipizza ancora thinking/output_config, ma l'API li accetta.
+    const rerankParams = {
+      model: RERANK_MODEL,
+      max_tokens: 2000,
+      messages: [{ role: 'user', content }],
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'low' },
+    } as unknown as Anthropic.MessageCreateParamsNonStreaming;
+    const t0 = Date.now();
     const response = await anthropic.messages.create(
-      {
-        model: RERANK_MODEL,
-        max_tokens: 300,
-        messages: [{ role: 'user', content }],
-      },
+      rerankParams,
       { signal: AbortSignal.timeout(20_000) }
     );
+    if (env.ZOE_DB) {
+      await insertSystemApiCall(env.ZOE_DB, 'reranker', RERANK_MODEL, response.usage, Date.now() - t0).catch(() => {});
+    }
 
     const raw = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')

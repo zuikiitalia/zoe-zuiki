@@ -1,12 +1,11 @@
 import type { D1Database } from '@cloudflare/workers-types';
 import Anthropic from '@anthropic-ai/sdk';
-import { insertApiCall } from './db';
-import { computeCostUsd } from './costs';
+import { insertSystemApiCall } from './usage';
 import { logger } from '../utils/logger';
 
-// Opus 4.7 per la review giornaliera: il job non è latency-sensitive e la qualità
-// dell'analisi è critica (i findings guidano gli update del prompt).
-const REVIEW_MODEL = 'claude-opus-4-7';
+// Sonnet 5.5 per la review giornaliera: stesso livello di qualità di analisi a circa
+// il 40% del costo di Opus 4.7. Il job non è latency-sensitive, quindi effort "medium".
+const REVIEW_MODEL = 'claude-sonnet-5-5';
 
 const REVIEW_SYSTEM = `Sei un revisore di qualità per Zoe, un AI customer care su WhatsApp per Zuiki.
 
@@ -55,9 +54,6 @@ export async function runDailyReview(
   let analyzed = 0;
   let totalFindings = 0;
 
-  // Conv ID sintetico per aggregare i costi della review nel DB (formato riconoscibile)
-  const reviewConvId = `review_${dateStr}`;
-
   for (const conv of convs.results ?? []) {
     try {
       // Carica solo i messaggi degli ultimi 7 giorni (non tutta la storia del cliente)
@@ -73,25 +69,20 @@ export async function runDailyReview(
         .join('\n\n');
 
       const t0 = Date.now();
+      // Thinking adaptive + effort medium; max_tokens ampio perché il thinking consuma
+      // dal budget di output. Cast: l'SDK 0.91 non tipizza thinking/output_config.
       const resp = await anthropic.messages.create({
         model: REVIEW_MODEL,
-        max_tokens: 1024,
+        max_tokens: 4096,
         system: REVIEW_SYSTEM,
         messages: [{ role: 'user', content: convText.slice(0, 30_000) }],
-      });
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'medium' },
+      } as unknown as Anthropic.MessageCreateParamsNonStreaming);
 
-      // Traccia il costo nel DB così appare nel dashboard
-      const usage = resp.usage as { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
-      await insertApiCall(db, reviewConvId, {
-        model: REVIEW_MODEL,
-        inputTokens: usage.input_tokens,
-        outputTokens: usage.output_tokens,
-        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
-        cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-        latencyMs: Date.now() - t0,
-        iteration: 0,
-        stopReason: resp.stop_reason ?? 'end_turn',
-      }).catch(() => {});
+      // Traccia il costo nella tabella delle chiamate di sistema (senza FK: prima,
+      // con conv_id fittizio in api_calls, ogni riga veniva rifiutata in silenzio).
+      await insertSystemApiCall(db, 'review', REVIEW_MODEL, resp.usage, Date.now() - t0, conv.id).catch(() => {});
 
       const text = resp.content
         .filter(b => b.type === 'text')
