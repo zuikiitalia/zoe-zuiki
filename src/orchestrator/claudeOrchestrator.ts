@@ -1032,14 +1032,21 @@ export async function processMessage(
   // Timeout 25s per evitare che il Worker resti appeso se Anthropic è lento.
   async function callClaude(attempt = 0): Promise<Anthropic.Message> {
     try {
+      // Sonnet 5.5: thinking adaptive a effort basso (risposte rapide per WhatsApp,
+      // costo minimo). Il loop ripassa l'intero response.content, quindi gli eventuali
+      // blocchi thinking vengono preservati tra i tool call come richiesto dal modello.
+      // Cast: l'SDK 0.91 non tipizza ancora thinking/output_config, ma l'API li accetta.
+      const params = {
+        model: CLAUDE_MODEL,
+        max_tokens: CLAUDE_MAX_TOKENS,
+        system: systemBlocks,
+        tools: beta ? TOOL_DEFINITIONS_BETA : TOOL_DEFINITIONS,
+        messages,
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'low' },
+      } as unknown as Anthropic.MessageCreateParamsNonStreaming;
       return await anthropic.messages.create(
-        {
-          model: CLAUDE_MODEL,
-          max_tokens: CLAUDE_MAX_TOKENS,
-          system: systemBlocks,
-          tools: beta ? TOOL_DEFINITIONS_BETA : TOOL_DEFINITIONS,
-          messages,
-        },
+        params,
         { signal: AbortSignal.timeout(25_000) }
       );
     } catch (err) {

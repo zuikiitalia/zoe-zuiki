@@ -1,7 +1,8 @@
 // Prezzi Anthropic per milione di token (aggiornati 2026-05).
 // https://www.anthropic.com/pricing
 const PRICING: Record<string, { input: number; output: number; cacheRead: number; cacheCreate: number }> = {
-  'claude-opus-4-7':    { input: 15.00, output: 75.00, cacheRead: 1.50,  cacheCreate: 18.75 },
+  'claude-sonnet-5-5':  { input:  2.00, output: 10.00, cacheRead: 0.20,  cacheCreate:  2.50 },
+  'claude-opus-4-7':    { input:  5.00, output: 25.00, cacheRead: 0.50,  cacheCreate:  6.25 },
   'claude-opus-4-5':    { input: 15.00, output: 75.00, cacheRead: 1.50,  cacheCreate: 18.75 },
   'claude-sonnet-4-6':  { input:  3.00, output: 15.00, cacheRead: 0.30,  cacheCreate:  3.75 },
   'claude-sonnet-4-5':  { input:  3.00, output: 15.00, cacheRead: 0.30,  cacheCreate:  3.75 },
