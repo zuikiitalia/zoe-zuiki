@@ -174,38 +174,3 @@ export async function isZoeBlocked(kv: KVNamespace, phone: string): Promise<bool
 export async function unblockZoeUser(kv: KVNamespace, phone: string): Promise<void> {
   await kv.delete(blockKey(phone));
 }
-
-// === Buffer messaggi concatenati (debounce) ===
-// Alcuni clienti spezzano un unico concetto in più messaggi ravvicinati.
-// Accodiamo i messaggi in arrivo e li elaboriamo insieme dopo una finestra di
-// silenzio: solo l'ultima invocazione del burst (lastTs == proprio token) processa.
-export interface BufferedMsg { text: string; images: string[]; ts: number }
-interface MsgBuffer { items: BufferedMsg[]; lastTs: number }
-
-const MSG_BUFFER_TTL = 120; // secondi
-
-function bufferKey(phone: string): string {
-  return `msg_buffer:${phone.replace(/\D/g, '').slice(-10)}`;
-}
-
-// Accoda un messaggio e ritorna il token (lastTs) di questa invocazione.
-export async function appendMessageBuffer(
-  kv: KVNamespace, phone: string, msg: BufferedMsg
-): Promise<number> {
-  const key = bufferKey(phone);
-  const raw = await kv.get(key);
-  let buf: MsgBuffer = raw ? (JSON.parse(raw) as MsgBuffer) : { items: [], lastTs: 0 };
-  buf.items.push(msg);
-  buf.lastTs = msg.ts;
-  await kv.put(key, JSON.stringify(buf), { expirationTtl: MSG_BUFFER_TTL });
-  return msg.ts;
-}
-
-export async function getMessageBuffer(kv: KVNamespace, phone: string): Promise<MsgBuffer | null> {
-  const raw = await kv.get(bufferKey(phone));
-  return raw ? (JSON.parse(raw) as MsgBuffer) : null;
-}
-
-export async function clearMessageBuffer(kv: KVNamespace, phone: string): Promise<void> {
-  await kv.delete(bufferKey(phone));
-}

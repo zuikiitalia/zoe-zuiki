@@ -30,7 +30,7 @@ import { logger } from '../utils/logger';
 import type { StoredMessage } from '../storage/kvStore';
 import { markHumanActive } from '../storage/kvStore';
 import { getCategoryName } from '../data/skuSuffixes';
-import { insertApiCall, insertToolCall, insertThought, insertFashionClipSearch, upsertConversation } from '../analytics/db';
+import { insertApiCall, insertToolCall, insertThought, insertFashionClipSearch, upsertConversation, loadVerifiedOrders } from '../analytics/db';
 import type { ApiCallData } from '../analytics/db';
 import { rerankCandidates } from '../clients/imageReranker';
 import type { RerankResult } from '../clients/imageReranker';
@@ -1014,6 +1014,21 @@ export async function processMessage(
       cache_control: { type: 'ephemeral' },
     },
   ];
+
+  // Ordini già verificati in questa conversazione: li passiamo al modello come blocco
+  // di system dinamico (non in cache). Lo storico contiene solo i testi, quindi senza
+  // questo blocco Zoe richiedeva dati già forniti (es. letti da uno screenshot).
+  if (env.ZOE_DB && convId) {
+    const known = await loadVerifiedOrders(env.ZOE_DB, convId, Date.now() - 7 * 24 * 60 * 60 * 1000)
+      .catch((e) => { logger.error('load_verified_orders_failed', { error: String(e) }, phone); return []; });
+    if (known.length) {
+      systemBlocks.push({
+        type: 'text',
+        text: 'DATI GIÀ VERIFICATI IN QUESTA CONVERSAZIONE (il cliente li ha già forniti: NON richiederli di nuovo, usali direttamente con get_order_by_number_and_email quando serve):\n' +
+          known.map((o) => `- ordine #${o.orderNumber} · email ${o.email}`).join('\n'),
+      });
+    }
+  }
 
   // Se un operatore CC ha già preso in carico la chat, lo comunichiamo esplicitamente
   // a Claude come secondo blocco di system (non in cache, perché varia per chat).
