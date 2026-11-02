@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Env } from '../config';
 import type { SimilarProductMatch } from './vectorizeClient';
 import { logger } from '../utils/logger';
+import { insertSystemApiCall } from '../analytics/usage';
 
 const RERANK_MODEL = 'claude-sonnet-5-5';
 export const RERANK_CONFIDENCE_THRESHOLD = 0.3;
@@ -95,10 +96,14 @@ CRITICAL: A lace/crochet/openwork garment is NOT visually similar to a smooth vi
       thinking: { type: 'adaptive' },
       output_config: { effort: 'low' },
     } as unknown as Anthropic.MessageCreateParamsNonStreaming;
+    const t0 = Date.now();
     const response = await anthropic.messages.create(
       rerankParams,
       { signal: AbortSignal.timeout(20_000) }
     );
+    if (env.ZOE_DB) {
+      await insertSystemApiCall(env.ZOE_DB, 'reranker', RERANK_MODEL, response.usage, Date.now() - t0).catch(() => {});
+    }
 
     const raw = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')

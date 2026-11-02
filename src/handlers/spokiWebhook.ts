@@ -20,7 +20,7 @@ import {
 } from '../storage/kvStore';
 import { processMessage } from '../orchestrator/claudeOrchestrator';
 import { sendSpokiMessage, createSpokiTicket } from '../clients/spokiClient';
-import { phoneHash, upsertConversation, updateSentiment, appendMessage, loadFullHistory } from '../analytics/db';
+import { phoneHash, upsertConversation, updateSentiment, appendMessage, loadFullHistory, ensureConversation } from '../analytics/db';
 import { analyzeSentiment } from '../analytics/sentiment';
 import { CLAUDE_MODEL } from '../config';
 
@@ -416,8 +416,17 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       history = await loadConversation(env.ZOE_KV, phone);
     }
 
-    const firstTs = history.length > 0 ? (history[0]?.ts ?? Date.now()) : Date.now();
+    const isNewCustomer = history.length === 0;
+    const firstTs = !isNewCustomer ? (history[0]?.ts ?? Date.now()) : Date.now();
     const convId = pHash ? `${pHash}_${firstTs}` : '';
+
+    // La riga della conversazione deve esistere PRIMA che l'orchestratore registri
+    // costi, tool call e pensieri (FOREIGN KEY in D1). Prima veniva creata solo a fine
+    // turno, e i costi del primo turno di ogni cliente nuovo andavano persi.
+    if (env.ZOE_DB && convId) {
+      await ensureConversation(env.ZOE_DB, convId, pHash, normalizePhone(phone), firstTs)
+        .catch((e) => logger.error('d1_ensure_conversation_failed', { error: String(e) }, phone));
+    }
 
     // Tronca la storia inviata a Claude: D1 ha la storia completa (per dashboard e analytics)
     // ma Claude riceve solo gli ultimi MAX_CLAUDE_HISTORY_MESSAGES per evitare timeout/token limits.
@@ -458,13 +467,15 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
       const placeholder = '(silenzio intenzionale: marker [NO_REPLY] emesso da Claude)';
       const updated: StoredMessage[] = [
         ...history,
-        { role: 'user', content: userContent, ts: now },
+        // Cliente nuovo: il primo messaggio prende il timestamp usato per convId, così al
+        // turno successivo history[0].ts === firstTs e la conversazione non si spezza in due.
+        { role: 'user', content: userContent, ts: isNewCustomer ? firstTs : now },
         { role: 'assistant' as const, content: placeholder, ts: now },
       ];
       await saveConversation(env.ZOE_KV, phone, updated);
       // Persistenza D1.
       if (env.ZOE_DB && pHash) {
-        await appendMessage(env.ZOE_DB, pHash, 'user', userContent, now).catch(() => {});
+        await appendMessage(env.ZOE_DB, pHash, 'user', userContent, isNewCustomer ? firstTs : now).catch(() => {});
         await appendMessage(env.ZOE_DB, pHash, 'assistant', placeholder, now).catch(() => {});
       }
       return;
@@ -497,13 +508,15 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
         : text;
       const updated: StoredMessage[] = [
         ...history,
-        { role: 'user', content: userContent, ts: now },
+        // Cliente nuovo: il primo messaggio prende il timestamp usato per convId, così al
+        // turno successivo history[0].ts === firstTs e la conversazione non si spezza in due.
+        { role: 'user', content: userContent, ts: isNewCustomer ? firstTs : now },
         ...sentReplies.map((r) => ({ role: 'assistant' as const, content: r, ts: now })),
       ];
       await saveConversation(env.ZOE_KV, phone, updated);
       // Persistenza D1 (no scadenza).
       if (env.ZOE_DB && pHash) {
-        await appendMessage(env.ZOE_DB, pHash, 'user', userContent, now).catch(() => {});
+        await appendMessage(env.ZOE_DB, pHash, 'user', userContent, isNewCustomer ? firstTs : now).catch(() => {});
         for (const r of sentReplies) {
           await appendMessage(env.ZOE_DB, pHash, 'assistant', r, now).catch(() => {});
         }
@@ -530,7 +543,7 @@ async function processAsync(env: Env, payload: unknown): Promise<void> {
 
         // Sentiment analysis su conversazioni con almeno 4 scambi.
         if (updated.length >= 4 && env.ANTHROPIC_API_KEY) {
-          await analyzeSentiment(env.ANTHROPIC_API_KEY, updated).then(result =>
+          await analyzeSentiment(env.ANTHROPIC_API_KEY, updated, env.ZOE_DB, convId).then(result =>
             updateSentiment(env.ZOE_DB!, convId, result.sentiment, result.note)
           ).catch((e) => { logger.error('d1_sentiment_failed', { error: String(e) }); });
         }
