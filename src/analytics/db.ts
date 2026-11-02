@@ -99,6 +99,34 @@ export async function ensureConversation(
   `).bind(convId, phoneHashStr, phoneFull, firstTs, now, now).run();
 }
 
+export interface VerifiedOrder { orderNumber: string; email: string; ts: number }
+
+// Ordini già verificati con successo in questa conversazione (ultimi N giorni).
+// Lo storico passato al modello contiene solo i testi: immagini e risultati dei tool
+// non ci sono. Senza questo, al turno dopo Zoe richiedeva numero d'ordine ed email
+// che il cliente aveva già dato (es. letti da uno screenshot).
+export async function loadVerifiedOrders(db: D1Database, convId: string, sinceMs: number): Promise<VerifiedOrder[]> {
+  const res = await db.prepare(`
+    SELECT ts, input_json FROM tool_calls
+    WHERE conv_id = ? AND tool_name = 'get_order_by_number_and_email' AND success = 1
+      AND ts >= ? AND output_json LIKE '%"found":true%'
+    ORDER BY ts DESC LIMIT 10
+  `).bind(convId, sinceMs).all<{ ts: number; input_json: string | null }>();
+  const seen = new Set<string>();
+  const out: VerifiedOrder[] = [];
+  for (const r of res.results ?? []) {
+    try {
+      const inp = JSON.parse(r.input_json ?? '{}') as { order_number?: unknown; email?: unknown };
+      const orderNumber = String(inp.order_number ?? '').replace(/^#/, '').trim();
+      const email = String(inp.email ?? '').trim();
+      if (!orderNumber || !email || seen.has(orderNumber)) continue;
+      seen.add(orderNumber);
+      out.push({ orderNumber, email, ts: r.ts });
+    } catch { /* input non leggibile: ignora */ }
+  }
+  return out.slice(0, 3);
+}
+
 export async function insertApiCall(db: D1Database, convId: string, call: ApiCallData): Promise<void> {
   const cost = computeCostUsd(call.model, call.inputTokens, call.outputTokens, call.cacheReadTokens, call.cacheCreationTokens);
   const id = `${convId}_${Date.now()}_${call.iteration}`;
